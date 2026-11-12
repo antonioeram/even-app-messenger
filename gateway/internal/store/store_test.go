@@ -117,7 +117,7 @@ func TestMessagesReturnsLatestInChronologicalOrder(t *testing.T) {
 		s.SaveMessage(ctx, msg("a", id, i, id))
 	}
 	s.SaveMessage(ctx, msg("other", "x", 9, "x"))
-	got, err := s.Messages(ctx, "a", 3, time.Time{})
+	got, err := s.Messages(ctx, "a", 3, Cursor{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestMessagesBeforeReturnsOlderPage(t *testing.T) {
 	for i, id := range []string{"m1", "m2", "m3", "m4"} {
 		s.SaveMessage(ctx, msg("a", id, i, id))
 	}
-	got, _ := s.Messages(ctx, "a", 2, t0.Add(2*time.Minute))
+	got, _ := s.Messages(ctx, "a", 2, Cursor{Time: t0.Add(2 * time.Minute)})
 	if len(got) != 2 || got[0].ID != "m1" || got[1].ID != "m2" {
 		t.Errorf("messages = %+v", got)
 	}
@@ -141,7 +141,7 @@ func TestMessageFieldsRoundTrip(t *testing.T) {
 	s, ctx := open(t), context.Background()
 	in := Message{ChatID: "a", ID: "m1", Sender: "Me", FromMe: true, Time: t0, Text: "pa", Kind: "text"}
 	s.SaveMessage(ctx, in)
-	got, _ := s.Messages(ctx, "a", 1, time.Time{})
+	got, _ := s.Messages(ctx, "a", 1, Cursor{})
 	if len(got) != 1 || got[0].Sender != "Me" || !got[0].FromMe || got[0].Text != "pa" || got[0].Kind != "text" || !got[0].Time.Equal(t0) {
 		t.Errorf("message = %+v", got)
 	}
@@ -182,7 +182,7 @@ func TestDataSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	got, _ := s.Messages(ctx, "a", 5, time.Time{})
+	got, _ := s.Messages(ctx, "a", 5, Cursor{})
 	if len(got) != 1 || got[0].Text != "kept" {
 		t.Errorf("messages = %+v", got)
 	}
@@ -277,7 +277,7 @@ func TestMessagesUseTheCurrentNameOfTheSender(t *testing.T) {
 	m.Sender, m.SenderID = "+40711000001", "40711000001@s.whatsapp.net"
 	s.SaveMessage(ctx, m)
 	s.UpsertChat(ctx, Chat{ID: "40711000001@s.whatsapp.net", Name: "Ana Pop"})
-	got, _ := s.Messages(ctx, "group", 5, time.Time{})
+	got, _ := s.Messages(ctx, "group", 5, Cursor{})
 	if len(got) != 1 || got[0].Sender != "Ana Pop" {
 		t.Errorf("messages = %+v, want sender Ana Pop", got)
 	}
@@ -288,7 +288,7 @@ func TestMessagesKeepTheStoredSenderWhenNoNameIsKnown(t *testing.T) {
 	m := msg("group", "m1", 0, "salut")
 	m.Sender, m.SenderID = "anutza", "40711000001@s.whatsapp.net"
 	s.SaveMessage(ctx, m)
-	got, _ := s.Messages(ctx, "group", 5, time.Time{})
+	got, _ := s.Messages(ctx, "group", 5, Cursor{})
 	if got[0].Sender != "anutza" {
 		t.Errorf("sender = %q, want anutza", got[0].Sender)
 	}
@@ -312,7 +312,7 @@ func TestOpenUpgradeDerivesSenderIDFromStoredPhoneNumbers(t *testing.T) {
 	}
 	defer s.Close()
 	s.UpsertChat(ctx, Chat{ID: "40711000001@s.whatsapp.net", Name: "Ana Pop"})
-	got, _ := s.Messages(ctx, "group", 5, time.Time{})
+	got, _ := s.Messages(ctx, "group", 5, Cursor{})
 	if len(got) != 1 || got[0].Sender != "Ana Pop" {
 		t.Errorf("messages after upgrade = %+v", got)
 	}
@@ -354,5 +354,61 @@ func TestChatsOffsetReturnsTheNextPage(t *testing.T) {
 	}
 	if got := append(append(ids(first), ids(second)...), ids(last)...); len(got) != 5 || got[0] != "e" || got[2] != "c" || got[4] != "a" {
 		t.Errorf("pages = %v, want e d | c b | a", got)
+	}
+}
+
+func TestMessagesBeforeSeparatesMessagesOfTheSameSecond(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	// Four messages in the same second, as a history sync delivers them.
+	for _, id := range []string{"m1", "m2", "m3", "m4"} {
+		s.SaveMessage(ctx, msg("a", id, 0, id))
+	}
+	newest, _ := s.Messages(ctx, "a", 2, Cursor{})
+	if len(newest) != 2 || newest[0].ID != "m3" {
+		t.Fatalf("newest page = %+v", newest)
+	}
+	older, _ := s.Messages(ctx, "a", 2, Cursor{Time: newest[0].Time, ID: newest[0].ID})
+	if len(older) != 2 || older[0].ID != "m1" || older[1].ID != "m2" {
+		t.Errorf("older page = %+v, want m1 and m2", older)
+	}
+}
+
+func TestPreviewFollowsTheNewestMessageAmongEqualTimes(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	// Same second: the reading order puts "m2" last, whatever the saving order.
+	s.SaveMessage(ctx, msg("a", "m2", 0, "second"))
+	mine := msg("a", "m1", 0, "first")
+	mine.FromMe = true
+	s.SaveMessage(ctx, mine)
+	chats, _ := s.Chats(ctx, 1, 0, All)
+	messages, _ := s.Messages(ctx, "a", 1, Cursor{})
+	if chats[0].Preview != messages[0].Text || chats[0].LastFromMe != messages[0].FromMe {
+		t.Errorf("preview = %q (mine=%v), newest message = %q (mine=%v)",
+			chats[0].Preview, chats[0].LastFromMe, messages[0].Text, messages[0].FromMe)
+	}
+}
+
+func TestOpenRepairsPreviewsThatDifferFromTheNewestMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "messages.db")
+	ctx := context.Background()
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SaveMessage(ctx, msg("a", "m1", 0, "newest"))
+	// Recreate what versions up to 0.7.0 could leave behind.
+	if _, err := s.db.ExecContext(ctx, `UPDATE chats SET preview = 'stale', last_from_me = 1; PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	chats, _ := s.Chats(ctx, 1, 0, All)
+	if chats[0].Preview != "newest" || chats[0].LastFromMe {
+		t.Errorf("chat after repair = %+v", chats[0])
 	}
 }

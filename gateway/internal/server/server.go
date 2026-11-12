@@ -16,11 +16,10 @@ import (
 
 // Options carries the values that differ between production and tests.
 type Options struct {
-	Version  string
-	Hostname string
-	Now      func() time.Time
-	Logger   *slog.Logger
-	// Store backs /chats; nil answers 503 (stage 0 behaviour).
+	Version string
+	Now     func() time.Time
+	Logger  *slog.Logger
+	// Store backs the chat endpoints; nil answers 503.
 	Store ChatStore
 	// Link reports the WhatsApp session state for the admin page.
 	Link func() LinkStatus
@@ -56,14 +55,6 @@ func New(cfg config.Config, opts Options) http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": opts.Version})
 	})
-	mux.Handle("GET /hello", auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		now := opts.Now()
-		writeJSON(w, http.StatusOK, map[string]string{
-			"text": helloText(opts.Hostname, now),
-			"time": now.Format(time.RFC3339),
-		})
-	})))
-
 	mux.Handle("GET /chats", auth(http.HandlerFunc(a.chats)))
 	mux.Handle("GET /counts", auth(http.HandlerFunc(a.counts)))
 	mux.Handle("GET /chats/{id}/messages", auth(http.HandlerFunc(a.messages)))
@@ -75,16 +66,6 @@ func New(cfg config.Config, opts Options) http.Handler {
 	mux.Handle("POST /admin/pair", auth(http.HandlerFunc(a.adminPair)))
 
 	return logRequests(opts.Logger, cors(cfg.CORSOrigins, jsonErrors(mux)))
-}
-
-// helloText is the stage 0 payload shown on the glasses. It carries the
-// server name and time so it is obvious the text came from the gateway.
-func helloText(hostname string, now time.Time) string {
-	return strings.Join([]string{
-		"Hello from the gateway!",
-		"Server: " + hostname,
-		"Time: " + now.Format("2006-01-02 15:04:05"),
-	}, "\n")
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -178,8 +159,9 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
-// logRequests writes one line per request. The Origin header is logged
-// because stage 0 needs to learn which origin the Even WebView sends.
+// logRequests writes one line per request, with the Origin header: it shows
+// which origin the Even app WebView calls from. Query strings and bodies are
+// left out.
 func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()

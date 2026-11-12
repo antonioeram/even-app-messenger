@@ -144,7 +144,18 @@ describe('gateway client', () => {
 
     expect(calls[0]?.url).toBe('https://gw.example/chats/123%40g.us/messages?limit=30')
     expect(conversation.chat.name).toBe('Familia')
-    expect(conversation.messages).toEqual([{ id: 'm1', sender: 'Ana', fromMe: false, clock: '09:35', text: 'Buna' }])
+    expect(conversation.messages).toEqual([{ id: 'm1', sender: 'Ana', fromMe: false, clock: '09:35', time: 't', text: 'Buna' }])
+  })
+
+  it('asks for the messages before a given one by its time and id', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ chat: { id: 'a@s.whatsapp.net' }, messages: [] }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    await client.messages('a@s.whatsapp.net', { id: '3EB0/A+1', sender: 'Ana', fromMe: false, clock: '09:35', time: '2026-11-12T07:35:00.5Z', text: 'x' })
+
+    expect(calls[0]?.url).toBe(
+      'https://gw.example/chats/a%40s.whatsapp.net/messages?limit=30&before=2026-11-12T07%3A35%3A00.5Z&before_id=3EB0%2FA%2B1',
+    )
   })
 
   it('reports an unknown chat as an http error', async () => {

@@ -1,8 +1,8 @@
 // A small persistent log for the phone page.
 //
-// It exists to answer the stage 0 question "what happens to the app when the
-// phone is locked?": lines survive a WebView restart, and late heartbeats
-// show for how long JavaScript was paused.
+// It shows what the app did and what happened to it while the phone was
+// locked: lines survive a WebView restart, and late heartbeats show for how
+// long JavaScript was paused.
 
 export interface KeyValueStore {
   getItem(key: string): string | null

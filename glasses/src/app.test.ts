@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   AudioEvent,
   EventSourceType,
+  ImageRawDataUpdateResult,
   OsEventTypeList,
   StartUpPageCreateResult,
   Sys_ItemEvent,
@@ -29,8 +30,9 @@ type BoxInput = {
   content?: string
   isEventCapture?: number
   textColor?: number
+  paddingLength?: number
 }
-type PageInput = { containerTotalNum?: number; textObject?: BoxInput[] }
+type PageInput = { containerTotalNum?: number; textObject?: BoxInput[]; imageObject?: BoxInput[] }
 
 /** Models the glasses: a page of text containers that can be replaced or updated in place. */
 class FakeBridge implements GlassesBridge {
@@ -45,12 +47,22 @@ class FakeBridge implements GlassesBridge {
   /** Microphone switch history: true = on. */
   mic: boolean[] = []
   createResult = StartUpPageCreateResult.success
+  /** True models glasses that reject any page with image containers. */
+  refuseImages = false
+  /** Image containers of the current page, and the bytes each one shows. */
+  private images: BoxInput[] = []
+  private pixels = new Map<number, number[]>()
+  /** Images sent since the start. */
+  imageUpdates = 0
   private listener: ((event: EvenHubEvent) => void) | null = null
 
   private setPage(page: PageInput): boolean {
     const boxes = page.textObject ?? []
+    const images = page.imageObject ?? []
+    if (images.length > 0 && this.refuseImages) return false
     // What the Even app validates before a page reaches the glasses.
-    expect(page.containerTotalNum).toBe(boxes.length)
+    expect(page.containerTotalNum).toBe(boxes.length + images.length)
+    expect(images.length).toBeLessThanOrEqual(4)
     expect(boxes.filter((box) => box.isEventCapture === 1)).toHaveLength(1)
     expect(new Set(boxes.map((box) => box.containerID)).size).toBe(boxes.length)
     for (const box of boxes) {
@@ -59,7 +71,29 @@ class FakeBridge implements GlassesBridge {
       expect((box.yPosition ?? 0) + (box.height ?? 0)).toBeLessThanOrEqual(288)
     }
     this.boxes = boxes.map((box) => ({ ...box }))
+    // Image containers start empty on every new page.
+    this.images = images.map((image) => ({ ...image }))
+    this.pixels.clear()
     return true
+  }
+
+  async updateImageRawData(update: { containerID?: number; containerName?: string; imageData?: unknown }) {
+    const image = this.images.find((candidate) => candidate.containerID === update.containerID)
+    if (!image) throw new Error(`no image container ${update.containerID} on the current page`)
+    expect(update.containerName).toBe(image.containerName)
+    this.pixels.set(update.containerID ?? -1, update.imageData as number[])
+    this.imageUpdates += 1
+    return ImageRawDataUpdateResult.success
+  }
+
+  /** For each row, whether the marker beside it is lit. */
+  get markers(): boolean[] {
+    return this.images.map((image) => this.pixels.get(image.containerID ?? -1)?.[0] === 1)
+  }
+
+  /** Padding of each box below the title. */
+  get paddings(): (number | undefined)[] {
+    return this.boxes.slice(1).map((box) => box.paddingLength)
   }
 
   async createStartUpPageContainer(page: PageInput) {
@@ -137,6 +171,7 @@ const message = (text: string, over: Partial<Message> = {}): Message => ({
   sender: 'Ana Pop',
   fromMe: false,
   clock: '09:35',
+  time: '2026-11-12T09:35:00Z',
   text,
   ...over,
 })
@@ -151,6 +186,8 @@ function fakeGateway(
     counts?: Step<Counts>
     /** What each call for a further page returns, in order. */
     more?: Chat[][]
+    /** What each call for messages older than the loaded ones returns, in order. */
+    older?: Message[][]
     sends?: (GatewayError | undefined)[]
   } = {},
 ) {
@@ -200,7 +237,14 @@ function fakeGateway(
       if (filter === 'unread') gateway.lastUnread = (step ?? []).length
       return step ?? []
     },
-    async messages(chatId: string): Promise<Conversation> {
+    /** Ids of the messages that older pages were asked before. */
+    olderCalls: [] as string[],
+    async messages(chatId: string, before?: Message): Promise<Conversation> {
+      if (before) {
+        gateway.olderCalls.push(before.id)
+        const chat = [ana, family].find((c) => c.id === chatId) ?? ana
+        return { chat, messages: options.older?.[gateway.olderCalls.length - 1] ?? [] }
+      }
       const step = messageSteps[Math.min(gateway.messageCalls.length, messageSteps.length - 1)]
       gateway.messageCalls.push(chatId)
       if (step instanceof GatewayError) throw step
@@ -238,16 +282,26 @@ const ringDoubleClick: EvenHubEvent = {
   }),
 }
 
-function setup(gateway: GatewayClient = fakeGateway()) {
+/** A stand-in for the canvas: one byte that says whether the marker is lit. */
+const renderMarker = async (lit: boolean) => new Uint8Array([lit ? 1 : 0])
+
+/** markers: true gives the app a marker renderer, as in the WebView; without it the selection is marked in the text. */
+function setup(gateway: GatewayClient = fakeGateway(), options: { markers?: boolean } = {}) {
   const bridge = new FakeBridge()
   const logs: string[] = []
-  const app = createApp({ bridge, gateway, gatewayUrl: 'https://gw.example', log: (line) => logs.push(line) })
+  const app = createApp({
+    bridge,
+    gateway,
+    gatewayUrl: 'https://gw.example',
+    log: (line) => logs.push(line),
+    ...(options.markers ? { renderMarker } : {}),
+  })
   return { bridge, app, logs }
 }
 
 /** Starts the app, moves the cursor down `index` times and clicks. */
-async function openChat(index = 0, gateway = fakeGateway()) {
-  const context = setup(gateway)
+async function openChat(index = 0, gateway = fakeGateway(), options: { markers?: boolean } = {}) {
+  const context = setup(gateway, options)
   await context.app.start()
   for (let i = 0; i < index; i += 1) context.bridge.emit(scrollDown)
   context.bridge.emit(click)
@@ -283,7 +337,7 @@ describe('inbox', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unread (2)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Familia  11.11', 'ok', '  Unanswered (5)', '  All chats (9)'])
+    expect(bridge.lines).toEqual(['Unread (2)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Familia  11.11', 'ok', '  Unanswered', '  All chats'])
     expect(bridge.brightness).toEqual([4, 2, 2, 2])
   })
 
@@ -295,7 +349,7 @@ describe('inbox', () => {
     const rebuilds = bridge.rebuilds
     bridge.emit(scrollDown)
     await app.idle()
-    expect(bridge.lines).toEqual(['Unread (2)', '* Ana Pop  09:36', 'Vii maine? (2)', '> Familia  11.11', 'ok', '  Unanswered (5)', '  All chats (9)'])
+    expect(bridge.lines).toEqual(['Unread (2)', '  Ana Pop  09:36', 'Vii maine? (2)', '> Familia  11.11', 'ok', '  Unanswered', '  All chats'])
     expect(bridge.brightness).toEqual([2, 4, 2, 2])
 
     bridge.emit(scrollUp)
@@ -304,6 +358,20 @@ describe('inbox', () => {
     expect(gateway.chatCalls).toBe(1)
     // Moving the selection never redraws the whole page.
     expect(bridge.rebuilds).toBe(rebuilds)
+  })
+
+  it('draws only the last state when gestures arrive faster than the glasses draw', async () => {
+    const { bridge, app } = setup()
+    await app.start()
+    const upgrades = bridge.upgrades
+
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+    await app.idle()
+
+    expect(bridge.brightness).toEqual([2, 2, 4, 2])
+    // The first row goes dim and the third bright; the second is never touched.
+    expect(bridge.upgrades).toBe(upgrades + 2)
   })
 
   it('stops at the ends of the list', async () => {
@@ -317,7 +385,7 @@ describe('inbox', () => {
     bridge.emit(scrollDown)
     await app.idle()
 
-    expect(bridge.lines.at(-1)).toBe('> All chats (9)')
+    expect(bridge.lines.at(-1)).toBe('> All chats')
   })
 
   it('shows the reason on the glasses when the gateway call fails', async () => {
@@ -337,7 +405,7 @@ describe('inbox', () => {
     bridge.emit(click)
     await app.idle()
 
-    expect(bridge.lines).toEqual(['Unread (1)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Unanswered (5)', '  All chats (9)'])
+    expect(bridge.lines).toEqual(['Unread (1)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Unanswered', '  All chats'])
   })
 
   it('asks the gateway for unread chats first', async () => {
@@ -354,7 +422,7 @@ describe('inbox', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unread (0)', '> Unanswered (5)', '  All chats (9)'])
+    expect(bridge.lines).toEqual(['Unread (0)', '> Unanswered', '  All chats'])
   })
 
   it('opens the box with all chats from the extra row', async () => {
@@ -849,16 +917,41 @@ describe('voice reply', () => {
 })
 
 describe('home links', () => {
-  it('shows how many chats each other box holds', async () => {
+  it('names the other boxes without numbers', async () => {
     const { bridge, app } = setup(fakeGateway({ counts: { unread: 2, unanswered: 12, all: 437 } }))
 
     await app.start()
 
     expect(bridge.lines[0]).toBe('Unread (2)')
-    expect(bridge.lines.slice(-2)).toEqual(['  Unanswered (12)', '  All chats (437)'])
+    expect(bridge.lines.slice(-2)).toEqual(['  Unanswered', '  All chats'])
   })
 
-  it('shows the links without numbers when the counts cannot be read', async () => {
+  it('centres the link rows in their boxes', async () => {
+    const { bridge, app } = setup()
+
+    await app.start()
+
+    const [chatPadding, , linkPadding, lastPadding] = bridge.paddings
+    expect(linkPadding ?? 0).toBeGreaterThan((chatPadding ?? 0) + 8)
+    expect(lastPadding).toBe(linkPadding)
+  })
+
+  it('lays the page out again when the next screenful mixes chats and links differently', async () => {
+    const third: Chat = { ...ana, id: 'c3@s.whatsapp.net', name: 'Chat 3' }
+    const { bridge, app } = setup(fakeGateway({ chats: [[ana, family, third]] }))
+    await app.start()
+    // First screenful: three chats and a link. Second: one link.
+    expect(bridge.paddings).toHaveLength(4)
+    const rebuilds = bridge.rebuilds
+
+    for (let i = 0; i < 4; i += 1) bridge.emit(scrollDown)
+    await app.idle()
+
+    expect(bridge.lines).toEqual(['Unread (3)', '> All chats'])
+    expect(bridge.rebuilds).toBe(rebuilds + 1)
+  })
+
+  it('still shows the home box when the counts cannot be read', async () => {
     const { bridge, app } = setup(fakeGateway({ counts: new GatewayError('http', 'HTTP 404') }))
 
     await app.start()
@@ -889,7 +982,7 @@ describe('boxes on screen', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unread (0)', '> Unanswered (5)', '  All chats (9)'])
+    expect(bridge.lines).toEqual(['Unread (0)', '> Unanswered', '  All chats'])
     expect(boxCount(bridge)).toBe(2)
   })
 
@@ -992,5 +1085,128 @@ describe('list totals and paging', () => {
     }
 
     expect(gateway.offsets).toEqual([20])
+  })
+})
+
+describe('selection marker', () => {
+  it('lights the image beside the selected row and keeps the text free of markers', async () => {
+    const { bridge, app } = setup(fakeGateway(), { markers: true })
+
+    await app.start()
+
+    expect(bridge.lines).toEqual(['Unread (2)', 'Ana Pop  09:36', 'Vii maine? (2)', 'Familia  11.11', 'ok', 'Unanswered', 'All chats'])
+    expect(bridge.markers).toEqual([true, false, false, false])
+    expect(bridge.brightness).toEqual([4, 2, 2, 2])
+  })
+
+  it('moves with the selection, without redrawing the page', async () => {
+    const { bridge, app } = setup(fakeGateway(), { markers: true })
+    await app.start()
+    const rebuilds = bridge.rebuilds
+    const images = bridge.imageUpdates
+
+    bridge.emit(scrollDown)
+    await app.idle()
+
+    expect(bridge.markers).toEqual([false, true, false, false])
+    expect(bridge.rebuilds).toBe(rebuilds)
+    // One image to light the new row, one to clear the old.
+    expect(bridge.imageUpdates).toBe(images + 2)
+  })
+
+  it('is drawn again when the list comes back from a chat', async () => {
+    const { bridge, app } = await openChat(1, fakeGateway(), { markers: true })
+
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    expect(bridge.markers).toEqual([false, true, false, false])
+  })
+
+  it('is not shown beside a note', async () => {
+    const { bridge, app } = setup(fakeGateway({ chats: [new GatewayError('network', 'Load failed')] }), { markers: true })
+
+    await app.start()
+
+    expect(bridge.text).toContain('Gateway unreachable')
+    expect(bridge.markers.every((lit) => !lit)).toBe(true)
+  })
+
+  it('falls back to a marker in the text when the glasses refuse a page with images', async () => {
+    const { bridge, app, logs } = setup(fakeGateway(), { markers: true })
+    bridge.refuseImages = true
+
+    await app.start()
+
+    expect(bridge.lines.slice(0, 2)).toEqual(['Unread (2)', '> Ana Pop  09:36'])
+    expect(bridge.markers).toEqual([])
+    expect(logs.join('\n')).toContain('markers off')
+  })
+
+  it('keeps working when an image cannot be drawn', async () => {
+    const bridge = new FakeBridge()
+    const logs: string[] = []
+    const app = createApp({
+      bridge,
+      gateway: fakeGateway(),
+      gatewayUrl: 'https://gw.example',
+      log: (line) => logs.push(line),
+      renderMarker: async () => {
+        throw new Error('no 2d canvas')
+      },
+    })
+
+    await app.start()
+    bridge.emit(scrollDown)
+    await app.idle()
+
+    expect(bridge.brightness).toEqual([2, 4, 2, 2])
+    expect(logs.join('\n')).toContain('no 2d canvas')
+  })
+})
+
+describe('older messages', () => {
+  const batch = (from: number, count: number) =>
+    Array.from({ length: count }, (_, i) => message(`message number ${from + i}`, { id: `m${from + i}` }))
+
+  it('marks the page count when the chat has more messages than were loaded', async () => {
+    const { bridge } = await openChat(0, fakeGateway({ messages: [batch(100, 30)] }))
+
+    expect(bridge.lines[0]).toMatch(/^Ana Pop (\d+)\/\1\+$/)
+  })
+
+  it('loads the messages before the oldest one when scrolling up past the first page', async () => {
+    const gateway = fakeGateway({ messages: [batch(100, 30)], older: [batch(90, 10)] })
+    const { bridge, app } = await openChat(0, gateway)
+    const pages = Number(/(\d+)\+$/.exec(bridge.lines[0] ?? '')?.[1])
+    for (let i = 0; i < pages - 1; i += 1) bridge.emit(scrollUp)
+    await app.idle()
+    expect(bridge.lines[0]).toBe(`Ana Pop 1/${pages}+`)
+    expect(gateway.olderCalls).toEqual([])
+
+    bridge.emit(scrollUp)
+    await app.idle()
+
+    expect(gateway.olderCalls).toEqual(['m100'])
+    // The page just before the one that was on screen.
+    expect(bridge.text).toContain('message number 99')
+    expect(bridge.text).not.toContain('message number 100')
+    // Fewer came than a full batch: nothing older is left.
+    expect(bridge.lines[0]).toMatch(/^Ana Pop \d+\/\d+$/)
+    for (let i = 0; i < 20; i += 1) bridge.emit(scrollUp)
+    await app.idle()
+    expect(bridge.text).toContain('message number 90')
+    expect(gateway.olderCalls).toHaveLength(1)
+  })
+
+  it('stays on the first page when nothing older exists', async () => {
+    const gateway = fakeGateway({ messages: [batch(100, 30)], older: [[]] })
+    const { bridge, app } = await openChat(0, gateway)
+    for (let i = 0; i < 40; i += 1) bridge.emit(scrollUp)
+    await app.idle()
+
+    expect(gateway.olderCalls).toEqual(['m100'])
+    expect(bridge.lines[0]).toMatch(/^Ana Pop 1\/\d+$/)
+    expect(bridge.text).toContain('message number 100')
   })
 })

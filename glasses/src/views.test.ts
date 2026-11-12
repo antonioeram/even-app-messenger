@@ -27,6 +27,7 @@ const message = (over: Partial<Message> = {}): Message => ({
   sender: 'Ana Pop',
   fromMe: false,
   clock: '09:35',
+  time: '2026-11-12T07:35:00Z',
   text: 'Buna',
   ...over,
 })
@@ -35,19 +36,19 @@ describe('inboxRows', () => {
   const chats = (n: number) => Array.from({ length: n }, (_, i) => chat({ id: `c${i}`, name: `Chat ${i}`, preview: 'hi', clock: '10:00' }))
   const texts = (rows: { text: string }[]) => rows.map((row) => row.text)
 
-  it('gives each chat a box: marker, name and time on top, newest text below', () => {
+  it('gives each chat a box: name and time on top, newest text below', () => {
     const rows = inboxRows([chat(), chat({ id: 'b', name: 'Familia', preview: 'ok', clock: '11.11' })], 1)
-    expect(texts(rows)).toEqual(['  Ana Pop  09:36\nVii maine?', '> Familia  11.11\nok'])
+    expect(texts(rows)).toEqual(['Ana Pop  09:36\nVii maine?', 'Familia  11.11\nok'])
     expect(rows.map((row) => row.selected)).toEqual([false, true])
   })
 
   it('says so when the newest message is mine', () => {
     const rows = inboxRows([chat({ lastFromMe: true, preview: 'Ajung in 10 minute' }), chat({ id: 'b' })], 1)
-    expect(texts(rows)).toEqual(['  Ana Pop  09:36\nMe: Ajung in 10 minute', '> Ana Pop  09:36\nVii maine?'])
+    expect(texts(rows)).toEqual(['Ana Pop  09:36\nMe: Ajung in 10 minute', 'Ana Pop  09:36\nVii maine?'])
   })
 
-  it('marks unread chats with a star and their count', () => {
-    expect(texts(inboxRows([chat({ unread: 3 }), chat({ id: 'b' })], 1))[0]).toBe('* Ana Pop  09:36\nVii maine? (3)')
+  it('shows the number of unread messages after the text', () => {
+    expect(texts(inboxRows([chat({ unread: 3 }), chat({ id: 'b' })], 1))[0]).toBe('Ana Pop  09:36\nVii maine? (3)')
   })
 
   it('keeps both lines of a box short enough not to wrap', () => {
@@ -58,13 +59,13 @@ describe('inboxRows', () => {
   })
 
   it('puts a multi-line preview on one line', () => {
-    expect(texts(inboxRows([chat({ preview: 'unu\ndoi' })], 0))[0]).toBe('> Ana Pop  09:36\nunu doi')
+    expect(texts(inboxRows([chat({ preview: 'unu\ndoi' })], 0))[0]).toBe('Ana Pop  09:36\nunu doi')
   })
 
   it('shows as many boxes as the screen holds', () => {
     const rows = inboxRows(chats(20), 0)
     expect(rows).toHaveLength(INBOX_ROWS)
-    expect(rows[0]?.text).toBe('> Chat 0  10:00\nhi')
+    expect(rows[0]?.text).toBe('Chat 0  10:00\nhi')
   })
 
   it('shows the list one screenful at a time', () => {
@@ -72,24 +73,34 @@ describe('inboxRows', () => {
     expect(onPage(12)).toEqual(['Chat 12', 'Chat 13', 'Chat 14', 'Chat 15'])
     expect(onPage(13)).toEqual(onPage(12))
     expect(onPage(16)).toEqual(['Chat 16', 'Chat 17', 'Chat 18', 'Chat 19'])
-    expect(inboxRows(chats(20), 13).filter((row) => row.selected).map((row) => row.text)).toEqual(['> Chat 13  10:00\nhi'])
+    expect(inboxRows(chats(20), 13).filter((row) => row.selected).map((row) => row.text)).toEqual(['Chat 13  10:00\nhi'])
   })
 
   it('keeps a full window at the end of the list', () => {
     const rows = inboxRows(chats(20), 19)
     expect(rows).toHaveLength(INBOX_ROWS)
-    expect(rows.at(-1)?.text).toBe('> Chat 19  10:00\nhi')
+    expect(rows.at(-1)?.text).toBe('Chat 19  10:00\nhi')
   })
 
   it('adds selectable link rows after the chats', () => {
     const rows = inboxRows([chat()], 2, ['[Unanswered]', '[All chats]'])
-    expect(texts(rows)).toEqual(['  Ana Pop  09:36\nVii maine?', '  [Unanswered]', '> [All chats]'])
+    expect(texts(rows)).toEqual(['Ana Pop  09:36\nVii maine?', '[Unanswered]', '[All chats]'])
+    expect(rows.map((row) => row.selected)).toEqual([false, false, true])
+  })
+
+  it('centres the link rows, which have one line, and not the chats', () => {
+    const rows = inboxRows([chat()], 0, ['Unanswered', 'All chats'])
+    expect(rows.map((row) => row.centered === true)).toEqual([false, true, true])
   })
 })
 
 describe('noteRows', () => {
   it('spreads the lines of a note over the row boxes, two lines each', () => {
     expect(noteRows('one\ntwo\nthree').map((row) => row.text)).toEqual(['one\ntwo', 'three'])
+  })
+
+  it('is bright but not selected, so it gets no selection marker', () => {
+    expect(noteRows('one\ntwo\nthree').map((row) => [row.note, row.selected])).toEqual([[true, false], [true, false]])
   })
 
   it('skips blank lines and never needs more boxes than the screen has', () => {
@@ -101,7 +112,7 @@ describe('noteRows', () => {
 
 describe('chatBubbles', () => {
   it('heads each bubble with sender and time and lists messages oldest first', () => {
-    const pages = chatBubbles(chat(), [
+    const pages = chatBubbles([
       message({ id: 'm1', clock: '09:35', text: 'Buna' }),
       message({ id: 'm2', clock: '09:36', text: 'Vii?', fromMe: true, sender: 'Me' }),
     ])
@@ -114,7 +125,7 @@ describe('chatBubbles', () => {
   })
 
   it('wraps long text inside the bubble and counts its lines', () => {
-    const [[bubble] = []] = chatBubbles(chat(), [message({ text: 'cuvant '.repeat(20).trim() })])
+    const [[bubble] = []] = chatBubbles([message({ text: 'cuvant '.repeat(20).trim() })])
     const lines = (bubble?.text ?? '').split('\n')
     expect(bubble?.lines).toBe(lines.length)
     expect(lines.length).toBeGreaterThan(2)
@@ -124,7 +135,7 @@ describe('chatBubbles', () => {
 
   it('fills pages up to the line budget, with the newest messages on the last page', () => {
     const messages = Array.from({ length: 10 }, (_, i) => message({ id: `m${i}`, text: `message number ${i}` }))
-    const pages = chatBubbles(chat(), messages)
+    const pages = chatBubbles(messages)
     expect(pages.length).toBeGreaterThan(1)
     for (const page of pages) {
       expect(page.reduce((total, bubble) => total + bubble.lines, 0)).toBeLessThanOrEqual(PAGE_LINE_BUDGET)
@@ -136,19 +147,19 @@ describe('chatBubbles', () => {
 
   it('fills the last page first, so the newest messages are never alone on a short page', () => {
     const messages = Array.from({ length: 4 }, (_, i) => message({ id: `m${i}`, text: `m${i}` }))
-    const pages = chatBubbles(chat(), messages)
+    const pages = chatBubbles(messages)
     expect(pages.at(-1)).toHaveLength(MAX_BUBBLES)
     expect(pages[0]).toHaveLength(4 - MAX_BUBBLES)
   })
 
   it('spreads a message longer than a page over several bubbles', () => {
-    const pages = chatBubbles(chat(), [message({ text: 'cuvant '.repeat(120).trim() })])
+    const pages = chatBubbles([message({ text: 'cuvant '.repeat(120).trim() })])
     expect(pages.length).toBeGreaterThan(1)
     for (const page of pages) expect(page.reduce((total, bubble) => total + bubble.lines, 0)).toBeLessThanOrEqual(PAGE_LINE_BUDGET)
     expect(pages.flat().map((bubble) => bubble.text.split('\n').slice(1).join(' ')).join(' ')).toBe('cuvant '.repeat(120).trim())
   })
 
   it('returns no pages for a chat without messages', () => {
-    expect(chatBubbles(chat(), [])).toEqual([])
+    expect(chatBubbles([])).toEqual([])
   })
 })

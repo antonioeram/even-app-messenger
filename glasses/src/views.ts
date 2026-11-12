@@ -7,7 +7,7 @@ import type { Chat, Message } from './gateway'
 import { fitText, INBOX_ROWS, type BubbleBox, type Row } from './screen'
 
 /** Longest line in an inbox box; short enough not to wrap in the proportional font. */
-export const INBOX_LINE_CHARS = 46
+export const INBOX_LINE_CHARS = 43
 
 /** Line length used to wrap text inside a bubble; kept conservative for the same reason. */
 export const BUBBLE_LINE_CHARS = 40
@@ -17,10 +17,11 @@ export const MAX_BUBBLES = 3
 export const PAGE_LINE_BUDGET = 7
 
 /**
- * The boxes of a chat list: a window of INBOX_ROWS rows around the cursor.
- * A chat box has marker, name and time on its first line and the newest text
- * on the second, prefixed with "Me:" when I wrote it. links are selectable rows after the chats (indexes
- * chats.length and up).
+ * The boxes of a chat list: the screenful of INBOX_ROWS rows that holds the
+ * cursor. A chat box has name and time on its first line and the newest text
+ * on the second, prefixed with "Me:" when I wrote it and followed by the
+ * number of unread messages. links are selectable one-line rows after the
+ * chats (indexes chats.length and up).
  */
 export function inboxRows(chats: readonly Chat[], cursor: number, links: readonly string[] = []): Row[] {
   const total = chats.length + links.length
@@ -32,16 +33,15 @@ export function inboxRows(chats: readonly Chat[], cursor: number, links: readonl
     const selected = index === cursor
     const chat = chats[index]
     if (!chat) {
-      rows.push({ text: `${selected ? '>' : ' '} ${links[index - chats.length] ?? ''}`, selected })
+      rows.push({ text: links[index - chats.length] ?? '', selected, centered: true })
       continue
     }
-    const marker = selected ? '>' : chat.unread > 0 ? '*' : ' '
-    const name = fitText(chat.name, INBOX_LINE_CHARS - 4 - chat.clock.length)
+    const name = fitText(chat.name, INBOX_LINE_CHARS - 2 - chat.clock.length)
     const count = chat.unread > 0 ? ` (${chat.unread})` : ''
     // The second line says who wrote the newest message when it was me.
     const author = chat.lastFromMe ? 'Me: ' : ''
     const preview = fitText(author + oneLine(chat.preview), INBOX_LINE_CHARS - count.length) + count
-    rows.push({ text: `${marker} ${name}  ${chat.clock}${preview ? `\n${preview}` : ''}`, selected })
+    rows.push({ text: `${name}  ${chat.clock}${preview ? `\n${preview}` : ''}`, selected })
   }
   return rows
 }
@@ -53,7 +53,7 @@ export function noteRows(text: string): Row[] {
   for (let index = 0; index < lines.length && rows.length < INBOX_ROWS; index += 2) {
     const last = rows.length === INBOX_ROWS - 1
     const pair = last ? [lines[index], lines.slice(index + 1).join(' ')] : lines.slice(index, index + 2)
-    rows.push({ text: pair.filter(Boolean).join('\n'), selected: true })
+    rows.push({ text: pair.filter(Boolean).join('\n'), selected: false, note: true })
   }
   return rows
 }
@@ -63,7 +63,7 @@ export function noteRows(text: string): Row[] {
  * newest messages. Each bubble starts with sender and time. Pages are filled
  * from the end, so the newest page is always a full one.
  */
-export function chatBubbles(_chat: Chat, messages: readonly Message[]): BubbleBox[][] {
+export function chatBubbles(messages: readonly Message[]): BubbleBox[][] {
   const bubbles: BubbleBox[] = []
   for (const message of messages) {
     const heading = `${message.fromMe ? 'Me' : message.sender} - ${message.clock}`

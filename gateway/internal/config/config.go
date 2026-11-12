@@ -17,7 +17,7 @@ type Config struct {
 	// or WebView. A single "*" allows every origin.
 	CORSOrigins []string
 	// DataDir holds the message database and the WhatsApp session.
-	// Empty disables storage: the gateway then serves /health and /hello only.
+	// Empty disables storage: the gateway then serves /health only.
 	DataDir string
 	// WhatsApp enables the WhatsApp connection. It needs DataDir.
 	WhatsApp bool

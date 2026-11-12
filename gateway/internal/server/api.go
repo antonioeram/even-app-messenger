@@ -24,7 +24,7 @@ type ChatStore interface {
 	SetUnread(ctx context.Context, chatID string, unread int) error
 	Counts(ctx context.Context) (store.Counts, error)
 	Chat(ctx context.Context, id string) (store.Chat, bool, error)
-	Messages(ctx context.Context, chatID string, limit int, before time.Time) ([]store.Message, error)
+	Messages(ctx context.Context, chatID string, limit int, before store.Cursor) ([]store.Message, error)
 }
 
 // Sender delivers a text message to an existing chat.
@@ -76,7 +76,7 @@ type messageJSON struct {
 	Kind   string `json:"kind"`
 }
 
-// api holds what the stage 1 handlers share.
+// api holds what the handlers share.
 type api struct {
 	store      ChatStore
 	link       func() LinkStatus
@@ -152,14 +152,19 @@ func (a *api) messages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var before time.Time
+	// before and before_id are the time and id of the oldest message the
+	// caller has: the answer is the page that precedes it.
+	before := store.Cursor{ID: r.URL.Query().Get("before_id")}
 	if raw := r.URL.Query().Get("before"); raw != "" {
 		parsed, err := time.Parse(time.RFC3339Nano, raw)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "before must be an RFC 3339 time")
 			return
 		}
-		before = parsed
+		before.Time = parsed
+	} else if before.ID != "" {
+		writeError(w, http.StatusBadRequest, "before_id needs before")
+		return
 	}
 	chat, found, err := a.store.Chat(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -191,7 +196,7 @@ func (a *api) messages(w http.ResponseWriter, r *http.Request) {
 			ID:     m.ID,
 			Sender: sender,
 			FromMe: m.FromMe,
-			Time:   m.Time.UTC().Format(time.RFC3339),
+			Time:   m.Time.UTC().Format(time.RFC3339Nano),
 			Clock:  a.clock(m.Time),
 			Text:   displayText(m.Text),
 			Kind:   m.Kind,

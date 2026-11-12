@@ -44,6 +44,14 @@ type Message struct {
 	Kind string
 }
 
+// Cursor marks a place in a chat: the messages older than the one written at
+// Time with the given ID. The zero Cursor stands for the end of the chat. An
+// empty ID takes every message written before Time.
+type Cursor struct {
+	Time time.Time
+	ID   string
+}
+
 // Filter selects which chats a list shows.
 type Filter int
 
@@ -137,7 +145,32 @@ func upgrade(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
-	return nil
+	return repair(ctx, db)
+}
+
+// newestMessage gives the chat row the time, text and author of the last
+// message in reading order.
+const newestMessage = `(last_ts, preview, last_from_me) = (
+	SELECT m.ts, m.text, m.from_me FROM messages m WHERE m.chat_id = chats.id
+	ORDER BY m.ts DESC, m.id DESC LIMIT 1)`
+
+// repair runs one-off corrections of stored data; user_version records the
+// ones already applied.
+func repair(ctx context.Context, db *sql.DB) error {
+	var version int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= 1 {
+		return nil
+	}
+	// Up to 0.7.0, of two messages written in the same second the one saved
+	// last became the preview, which is not always the one read last.
+	_, err := db.ExecContext(ctx, `
+		UPDATE chats SET `+newestMessage+`
+		WHERE EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = chats.id);
+		PRAGMA user_version = 1`)
+	return err
 }
 
 // Close releases the database.
@@ -179,9 +212,7 @@ func (s *Store) SaveMessage(ctx context.Context, m Message) (bool, error) {
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO chats (id) VALUES (?)`, m.ChatID); err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE chats SET last_ts = ?, preview = ?, last_from_me = ? WHERE id = ? AND last_ts <= ?`,
-		ts, m.Text, boolInt(m.FromMe), m.ChatID, ts); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE chats SET `+newestMessage+` WHERE id = ?`, m.ChatID); err != nil {
 		return false, err
 	}
 	return inserted > 0, tx.Commit()
@@ -258,17 +289,19 @@ func (s *Store) Chat(ctx context.Context, id string) (c Chat, ok bool, err error
 
 // Messages returns up to limit messages of a chat, oldest first. With a zero
 // before it returns the newest ones; otherwise the ones older than before.
-func (s *Store) Messages(ctx context.Context, chatID string, limit int, before time.Time) ([]Message, error) {
+func (s *Store) Messages(ctx context.Context, chatID string, limit int, before Cursor) ([]Message, error) {
 	cutoff := int64(1<<62 - 1)
-	if !before.IsZero() {
-		cutoff = before.UnixMilli()
+	if !before.Time.IsZero() {
+		cutoff = before.Time.UnixMilli()
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.chat_id, m.id, COALESCE(NULLIF(c.name, ''), m.sender), m.from_me, m.ts, m.text, m.kind, m.sender_id
 		FROM (
-			SELECT * FROM messages WHERE chat_id = ? AND ts < ? ORDER BY ts DESC, id DESC LIMIT ?
+			SELECT * FROM messages
+			WHERE chat_id = ?1 AND (ts < ?2 OR (ts = ?2 AND ?3 != '' AND id < ?3))
+			ORDER BY ts DESC, id DESC LIMIT ?4
 		) m LEFT JOIN chats c ON m.sender_id != '' AND c.id = m.sender_id
-		ORDER BY m.ts ASC, m.id ASC`, chatID, cutoff, limit)
+		ORDER BY m.ts ASC, m.id ASC`, chatID, cutoff, before.ID, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -22,9 +22,8 @@ func newTestHandler(cfg config.Config) http.Handler {
 		cfg.CORSOrigins = []string{"*"}
 	}
 	return New(cfg, Options{
-		Version:  "test",
-		Hostname: "homelab",
-		Now:      func() time.Time { return fixedNow },
+		Version: "test",
+		Now:     func() time.Time { return fixedNow },
 	})
 }
 
@@ -65,31 +64,8 @@ func TestHealthReportsOkAndVersion(t *testing.T) {
 	}
 }
 
-func TestHelloReturnsTextWithHostAndServerTime(t *testing.T) {
-	rec := do(t, newTestHandler(config.Config{}), http.MethodGet, "/hello", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	body := decode(t, rec)
-	text, _ := body["text"].(string)
-	for _, want := range []string{"Hello from the gateway", "homelab", "09:41:07"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("text %q does not contain %q", text, want)
-		}
-	}
-	// The glasses font is not guaranteed to have non-ASCII glyphs.
-	for _, r := range text {
-		if r > 127 {
-			t.Errorf("text %q contains non-ASCII character %q", text, r)
-		}
-	}
-	if body["time"] != "2026-11-12T09:41:07Z" {
-		t.Errorf("time field = %v", body["time"])
-	}
-}
-
 func TestResponsesAreNotCacheable(t *testing.T) {
-	rec := do(t, newTestHandler(config.Config{}), http.MethodGet, "/hello", nil)
+	rec := do(t, newStoreHandler(config.Config{}, &fakeStore{}, nil), http.MethodGet, "/counts", nil)
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
 		t.Errorf("Cache-Control = %q, want no-store", cc)
 	}
@@ -113,7 +89,7 @@ func TestWrongMethodReturns405(t *testing.T) {
 }
 
 func TestWildcardCORSAllowsAnyOrigin(t *testing.T) {
-	rec := do(t, newTestHandler(config.Config{}), http.MethodGet, "/hello",
+	rec := do(t, newStoreHandler(config.Config{}, &fakeStore{}, nil), http.MethodGet, "/counts",
 		map[string]string{"Origin": "https://webview.example"})
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want *", got)
@@ -121,9 +97,9 @@ func TestWildcardCORSAllowsAnyOrigin(t *testing.T) {
 }
 
 func TestListedCORSOriginIsEchoedAndOthersAreNot(t *testing.T) {
-	h := newTestHandler(config.Config{CORSOrigins: []string{"https://app.example"}})
+	h := newStoreHandler(config.Config{CORSOrigins: []string{"https://app.example"}}, &fakeStore{}, nil)
 
-	allowed := do(t, h, http.MethodGet, "/hello", map[string]string{"Origin": "https://app.example"})
+	allowed := do(t, h, http.MethodGet, "/counts", map[string]string{"Origin": "https://app.example"})
 	if got := allowed.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example" {
 		t.Errorf("allowed origin: Access-Control-Allow-Origin = %q", got)
 	}
@@ -131,15 +107,15 @@ func TestListedCORSOriginIsEchoedAndOthersAreNot(t *testing.T) {
 		t.Errorf("allowed origin: Vary = %q, want it to include Origin", got)
 	}
 
-	denied := do(t, h, http.MethodGet, "/hello", map[string]string{"Origin": "https://evil.example"})
+	denied := do(t, h, http.MethodGet, "/counts", map[string]string{"Origin": "https://evil.example"})
 	if got := denied.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("denied origin: Access-Control-Allow-Origin = %q, want empty", got)
 	}
 }
 
 func TestPreflightIsAnsweredWithoutAuth(t *testing.T) {
-	h := newTestHandler(config.Config{Token: "s3cret"})
-	rec := do(t, h, http.MethodOptions, "/hello", map[string]string{
+	h := newStoreHandler(config.Config{Token: "s3cret"}, &fakeStore{}, nil)
+	rec := do(t, h, http.MethodOptions, "/counts", map[string]string{
 		"Origin":                         "https://webview.example",
 		"Access-Control-Request-Method":  "GET",
 		"Access-Control-Request-Headers": "authorization",
@@ -162,7 +138,7 @@ func TestPreflightIsAnsweredWithoutAuth(t *testing.T) {
 }
 
 func TestTokenIsRequiredWhenConfigured(t *testing.T) {
-	h := newTestHandler(config.Config{Token: "s3cret"})
+	h := newStoreHandler(config.Config{Token: "s3cret"}, &fakeStore{}, nil)
 
 	cases := []struct {
 		name   string
@@ -180,7 +156,7 @@ func TestTokenIsRequiredWhenConfigured(t *testing.T) {
 			if tc.header != "" {
 				headers["Authorization"] = tc.header
 			}
-			rec := do(t, h, http.MethodGet, "/hello", headers)
+			rec := do(t, h, http.MethodGet, "/counts", headers)
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
 			}
@@ -199,20 +175,20 @@ func TestHealthStaysOpenWhenTokenIsConfigured(t *testing.T) {
 	}
 }
 
-func TestHelloIsOpenWhenNoTokenIsConfigured(t *testing.T) {
-	rec := do(t, newTestHandler(config.Config{}), http.MethodGet, "/hello", nil)
+func TestAPIIsOpenWhenNoTokenIsConfigured(t *testing.T) {
+	rec := do(t, newStoreHandler(config.Config{}, &fakeStore{}, nil), http.MethodGet, "/counts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 }
 
-// --- stage 1: chats and messages ---
+// --- chats and messages ---
 
 type fakeStore struct {
 	chats     []store.Chat
 	messages  map[string][]store.Message
 	gotLimit  int
-	gotBefore time.Time
+	gotBefore store.Cursor
 	gotFilter store.Filter
 	gotOffset int
 	readChat  string
@@ -239,7 +215,7 @@ func (f *fakeStore) Chat(_ context.Context, id string) (store.Chat, bool, error)
 	return store.Chat{}, false, nil
 }
 
-func (f *fakeStore) Messages(_ context.Context, chatID string, limit int, before time.Time) ([]store.Message, error) {
+func (f *fakeStore) Messages(_ context.Context, chatID string, limit int, before store.Cursor) ([]store.Message, error) {
 	f.gotLimit, f.gotBefore = limit, before
 	return f.messages[chatID], nil
 }
@@ -249,9 +225,9 @@ func newStoreHandler(cfg config.Config, st ChatStore, link func() LinkStatus) ht
 		cfg.CORSOrigins = []string{"*"}
 	}
 	return New(cfg, Options{
-		Version: "test", Hostname: "homelab",
-		Now:   func() time.Time { return fixedNow },
-		Store: st, Link: link,
+		Version: "test",
+		Now:     func() time.Time { return fixedNow },
+		Store:   st, Link: link,
 		Location: time.UTC,
 	})
 }
@@ -350,9 +326,12 @@ func TestMessagesReturnsChatAndMessages(t *testing.T) {
 func TestMessagesPassesBeforeAndLimit(t *testing.T) {
 	st := sampleStore()
 	h := newStoreHandler(config.Config{}, st, nil)
-	do(t, h, http.MethodGet, "/chats/40711@s.whatsapp.net/messages?limit=5&before=2026-11-12T09:00:00Z", nil)
-	if st.gotLimit != 5 || !st.gotBefore.Equal(time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)) {
-		t.Errorf("limit=%d before=%v", st.gotLimit, st.gotBefore)
+	do(t, h, http.MethodGet, "/chats/40711@s.whatsapp.net/messages?limit=5&before=2026-11-12T09:00:00Z&before_id=m7", nil)
+	if st.gotLimit != 5 || !st.gotBefore.Time.Equal(time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)) || st.gotBefore.ID != "m7" {
+		t.Errorf("limit=%d before=%+v", st.gotLimit, st.gotBefore)
+	}
+	if rec := do(t, h, http.MethodGet, "/chats/40711@s.whatsapp.net/messages?before_id=m7", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("before_id without before: status = %d, want 400", rec.Code)
 	}
 	if rec := do(t, h, http.MethodGet, "/chats/40711@s.whatsapp.net/messages?before=yesterday", nil); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad before: status = %d, want 400", rec.Code)

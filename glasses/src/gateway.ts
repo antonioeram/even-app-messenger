@@ -30,6 +30,8 @@ export interface Message {
   sender: string
   fromMe: boolean
   clock: string
+  /** When it was written, as the gateway gave it; identifies the message for paging. */
+  time: string
   text: string
 }
 
@@ -64,7 +66,8 @@ export interface GatewayClient {
   /** One page of a chat list; offset skips the chats already loaded. */
   chats(filter?: ChatFilter, offset?: number): Promise<Chat[]>
   counts(): Promise<Counts>
-  messages(chatId: string): Promise<Conversation>
+  /** The newest messages of a chat or, with before, the ones written just before that message. */
+  messages(chatId: string, before?: Message): Promise<Conversation>
   /** Clears the gateway's unread counter; sends no read receipt to WhatsApp. */
   markRead(chatId: string): Promise<void>
   /** pcm: 16 kHz, 16 bit, mono, little endian. */
@@ -74,7 +77,8 @@ export interface GatewayClient {
 
 // Chats are loaded a page at a time, as the selection moves down the list.
 const CHAT_LIMIT = 20
-const MESSAGE_LIMIT = 30
+/** Messages in one answer; a shorter answer means the chat has nothing older. */
+export const MESSAGE_LIMIT = 30
 const TRANSCRIBE_TIMEOUT_MS = 45_000
 const SEND_TIMEOUT_MS = 20_000
 
@@ -168,8 +172,11 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
       return { unread: body.unread, unanswered: body.unanswered, all: body.all }
     },
 
-    async messages(chatId) {
-      const body = await getJson(`/chats/${encodeURIComponent(chatId)}/messages?limit=${MESSAGE_LIMIT}`)
+    async messages(chatId, before) {
+      const cursor = before
+        ? `&before=${encodeURIComponent(before.time)}&before_id=${encodeURIComponent(before.id)}`
+        : ''
+      const body = await getJson(`/chats/${encodeURIComponent(chatId)}/messages?limit=${MESSAGE_LIMIT}${cursor}`)
       if (!isRecord(body) || !isRecord(body.chat) || !Array.isArray(body.messages)) {
         throw new GatewayError('invalid', 'response has no chat or messages')
       }
@@ -222,6 +229,7 @@ function parseMessage(raw: unknown): Message {
     sender: text(raw.sender),
     fromMe: raw.from_me === true,
     clock: text(raw.clock),
+    time: text(raw.time),
     text: text(raw.text),
   }
 }

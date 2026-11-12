@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/gateway /gateway
-# /data will hold the SQLite database and the WhatsApp session (stage 1+).
+# /data holds the SQLite databases: the messages and the WhatsApp session.
 # Created here so a named volume inherits the non-root owner.
 COPY --from=build --chown=nonroot:nonroot /out/data /data
 VOLUME /data

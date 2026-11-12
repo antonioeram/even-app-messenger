@@ -1,8 +1,8 @@
 // Command gateway is the home-server side of the Even G2 messenger.
 //
-// Without GATEWAY_DATA_DIR it serves /health and /hello only. With it, it
-// keeps a WhatsApp session, stores chats and messages in SQLite and serves
-// them at /chats, plus the pairing page at /admin. Stage 1 is read-only.
+// With GATEWAY_DATA_DIR it keeps a WhatsApp session, stores chats and
+// messages in SQLite, serves them to the glasses app, sends replies and
+// offers the pairing page at /admin. Without it only /health answers.
 package main
 
 import (
@@ -53,15 +53,10 @@ func main() {
 }
 
 func run(cfg config.Config, logger *slog.Logger) error {
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = "unknown"
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	opts := server.Options{Version: version, Hostname: hostname, Logger: logger}
+	opts := server.Options{Version: version, Logger: logger}
 	if cfg.DataDir != "" {
 		messages, err := store.Open(ctx, filepath.Join(cfg.DataDir, "messages.db"))
 		if err != nil {

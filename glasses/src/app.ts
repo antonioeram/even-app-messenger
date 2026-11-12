@@ -1,19 +1,24 @@
-// Stage 1 app: an inbox list of WhatsApp chats and a reading screen.
+// The app on the glasses: lists of WhatsApp chats, a reading screen and a
+// voice reply.
 //
-// The lists are a title and four bordered boxes whose texts change in place;
-// a chat is a title and message bubbles, theirs left and mine right.
+// A list is a title and up to four bordered boxes whose texts change in
+// place, with an arrowhead beside the selected one; a chat is a title and
+// message bubbles, theirs left and mine right.
 // Unread:     the home box, chats with unread messages. Scroll moves the
 //             selection, click opens, double click asks to exit. Its last
 //             two rows open the other boxes.
 // Unanswered: read chats waiting for my reply; double click goes home.
 // All chats:  every chat; double click goes home.
-// Chat:       opens on the newest page; scroll turns pages, click reloads, double
-//             click goes back to the box it was opened from. Holding the
-//             touchpad records a reply; releasing it transcribes; the text
-//             is sent only after a click.
+// Chat:       opens on the newest page; scroll turns pages and, past the
+//             first one, loads older messages; click reloads; double click
+//             goes back to the box it was opened from. Holding the touchpad
+//             records a reply; releasing it transcribes; the text is sent
+//             only after a click.
 
 import {
   AudioInputSource,
+  ImageRawDataUpdate,
+  ImageRawDataUpdateResult,
   OsEventTypeList,
   StartUpPageCreateResult,
   type CreateStartUpPageContainer,
@@ -23,11 +28,13 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import {
   GatewayError,
+  MESSAGE_LIMIT,
   type Chat,
   type ChatFilter,
   type Counts,
   type GatewayClient,
   type GatewayErrorKind,
+  type Message,
 } from './gateway'
 import { gestureFromEvent, sourceFromEvent } from './gestures'
 import {
@@ -35,7 +42,9 @@ import {
   headUpdate,
   inboxPage,
   INBOX_ROWS,
+  markerSlot,
   notePage,
+  rowLayout,
   rowUpdate,
   startupInbox,
   type BubbleBox,
@@ -50,6 +59,8 @@ export interface GlassesBridge {
   rebuildPageContainer(container: RebuildPageContainer): Promise<boolean>
   /** Changes the text of one container in place, without flicker. */
   textContainerUpgrade(container: TextContainerUpgrade): Promise<boolean>
+  /** Sends the pixels of an image container. */
+  updateImageRawData(data: ImageRawDataUpdate): Promise<ImageRawDataUpdateResult>
   /** Switches the microphone; audio then arrives as audioEvent frames. */
   audioControl(isOpen: boolean, source?: AudioInputSource): Promise<boolean>
   shutDownPageContainer(exitMode?: number): Promise<boolean>
@@ -63,6 +74,11 @@ export interface AppOptions {
   gatewayUrl: string
   /** Diagnostic lines for the phone page. */
   log: (line: string) => void
+  /**
+   * Draws the selection marker (lit) or an empty image and returns it
+   * encoded. Without it the selected row is marked in its text.
+   */
+  renderMarker?: (lit: boolean) => Promise<Uint8Array>
 }
 
 export interface App {
@@ -93,11 +109,6 @@ const BOX_FILTER: Record<Box, ChatFilter | undefined> = { unread: 'unread', unan
 const HOME_LINKS: readonly Box[] = ['unanswered', 'all']
 const BOX_COUNT: Record<Box, keyof Counts> = { unread: 'unread', unanswered: 'unanswered', all: 'all' }
 
-/** The link rows of the home box, with the size of each box when it is known. */
-function homeLinks(counts: Counts | null): string[] {
-  return HOME_LINKS.map((box) => (counts ? `${BOX_TITLE[box]} (${counts[BOX_COUNT[box]]})` : BOX_TITLE[box]))
-}
-
 // 16 kHz, 16 bit, mono.
 const BYTES_PER_SECOND = 32_000
 /** Shorter recordings are an accidental hold. */
@@ -119,11 +130,24 @@ type Screen =
   | { name: 'inbox'; box: Box; chats: Chat[]; total: number; cursor: number; links: string[] }
   /** A message is shown instead of the list: loading or failed. */
   | { name: 'inboxText'; box: Box }
-  /** pages is empty while the chat is loading or after a failure. */
-  | { name: 'chat'; box: Box; chat: Chat; pages: BubbleBox[][]; page: number; reply?: Reply }
+  /**
+   * messages are the ones loaded so far, oldest first, and pages is what they
+   * fill; both are empty while the chat is loading or after a failure. more
+   * says that the gateway may hold older messages.
+   */
+  | {
+      name: 'chat'
+      box: Box
+      chat: Chat
+      messages: Message[]
+      more: boolean
+      pages: BubbleBox[][]
+      page: number
+      reply?: Reply
+    }
 
 export function createApp(options: AppOptions): App {
-  const { bridge, gateway, gatewayUrl, log } = options
+  const { bridge, gateway, gatewayUrl, log, renderMarker } = options
   const pending = new Set<Promise<unknown>>()
   let screen: Screen = { name: 'inboxText', box: HOME }
   let loading: Promise<void> | null = null
@@ -138,12 +162,28 @@ export function createApp(options: AppOptions): App {
   }
 
   /** What the inbox layout shows now; null while another layout is on the glasses. */
-  let inboxShown: { title: string; rows: Row[] } | null = null
+  let inboxShown: { title: string; rows: Row[]; markers: boolean } | null = null
+  /** False without a renderer, and once the glasses or the canvas failed to show a marker. */
+  let markersOn = Boolean(renderMarker)
+  /** Whether the marker beside each row is lit; a new page starts with all of them empty. */
+  let markerLit: boolean[] = []
+  /** The lit and the empty marker image, each drawn once. */
+  const markerImages = new Map<boolean, Promise<number[]>>()
   /** Draw calls run one after another, so each sees what the previous one left on the glasses. */
   let drawing: Promise<void> = Promise.resolve()
+  /** Number of the newest draw call. */
+  let drawn = 0
 
+  /**
+   * Queues a draw of the whole screen. One that a newer call has replaced by
+   * the time its turn comes is skipped: gestures can arrive faster than the
+   * glasses draw, and only the last state matters.
+   */
   function draw(work: () => Promise<void>): Promise<void> {
-    drawing = drawing.then(work, work)
+    drawn += 1
+    const turn = drawn
+    const run = () => (turn === drawn ? work() : Promise.resolve())
+    drawing = drawing.then(run, run)
     return drawing
   }
 
@@ -152,22 +192,74 @@ export function createApp(options: AppOptions): App {
     if (!ok) log('textContainerUpgrade failed')
   }
 
-  /** Shows a title and rows in the inbox layout, changing only the boxes that differ. */
+  function markerImage(lit: boolean): Promise<number[]> {
+    let image = markerImages.get(lit)
+    if (!image && renderMarker) {
+      image = renderMarker(lit).then((bytes) => Array.from(bytes))
+      markerImages.set(lit, image)
+    }
+    return image ?? Promise.reject(new Error('no marker renderer'))
+  }
+
+  /** Lights the marker of the selected row and clears the one that was lit. Images go one at a time. */
+  async function drawMarkers(rows: readonly Row[]): Promise<void> {
+    if (!markersOn) return
+    // The selected row first, so the marker is on its new row as early as possible.
+    const order = [...rows.keys()].sort((a, b) => Number(rows[b]?.selected) - Number(rows[a]?.selected))
+    for (const index of order) {
+      const lit = rows[index]?.selected === true
+      if ((markerLit[index] ?? false) === lit) continue
+      try {
+        const imageData = await markerImage(lit)
+        const result = await bridge.updateImageRawData(new ImageRawDataUpdate({ ...markerSlot(index), imageData }))
+        if (result !== ImageRawDataUpdateResult.success) throw new Error(`the glasses answered ${result}`)
+        markerLit[index] = lit
+      } catch (error) {
+        // The selection must stay visible: from here on it is marked in the text.
+        markersOn = false
+        log(`markers off: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+    }
+  }
+
+  /** Lays the inbox page out; image containers come back empty. */
+  async function rebuildInbox(title: string, rows: readonly Row[]): Promise<void> {
+    let ok = await bridge.rebuildPageContainer(inboxPage(title, rows, markersOn))
+    if (!ok && markersOn) {
+      markersOn = false
+      log('markers off: the glasses refused a page with images')
+      ok = await bridge.rebuildPageContainer(inboxPage(title, rows, false))
+    }
+    if (!ok) log('rebuildPageContainer failed')
+    markerLit = []
+  }
+
+  /** Puts title and rows on the glasses, changing in place whatever the page on screen allows. */
+  async function paintInbox(title: string, rows: Row[]): Promise<void> {
+    const shown = inboxShown
+    if (!shown || shown.markers !== markersOn || rowLayout(shown.rows) !== rowLayout(rows)) {
+      await rebuildInbox(title, rows)
+    } else {
+      if (shown.title !== title) await upgrade(headUpdate(title))
+      for (const [index, row] of rows.entries()) {
+        const old = shown.rows[index]
+        if (old?.text !== row.text || old.selected !== row.selected || old.note !== row.note) {
+          await upgrade(rowUpdate(index, row, markersOn))
+        }
+      }
+    }
+    inboxShown = { title, rows, markers: markersOn }
+  }
+
+  /** Shows a title and rows in the inbox layout. */
   function showInbox(title: string, rows: readonly Row[]): Promise<void> {
     return draw(async () => {
       const next = rows.slice(0, INBOX_ROWS)
-      // The page has one box per row, so a different number of rows needs a new page.
-      if (!inboxShown || inboxShown.rows.length !== next.length) {
-        const ok = await bridge.rebuildPageContainer(inboxPage(title, next))
-        if (!ok) log('rebuildPageContainer failed')
-      } else {
-        if (inboxShown.title !== title) await upgrade(headUpdate(title))
-        for (const [index, row] of next.entries()) {
-          const shown = inboxShown.rows[index]
-          if (shown?.text !== row.text || shown.selected !== row.selected) await upgrade(rowUpdate(index, row))
-        }
-      }
-      inboxShown = { title, rows: next }
+      await paintInbox(title, next)
+      await drawMarkers(next)
+      // The markers were given up while drawing: lay the page out for a marker in the text.
+      if (inboxShown?.markers !== markersOn) await paintInbox(title, next)
     })
   }
 
@@ -183,9 +275,10 @@ export function createApp(options: AppOptions): App {
   /** Draws the current page of the open chat. */
   function showChat(): Promise<void> {
     if (screen.name !== 'chat') return Promise.resolve()
-    const { chat, pages, page } = screen
+    const { chat, pages, page, more } = screen
     if (pages.length === 0) return showPage(notePage(chat.name, 'No messages'))
-    return showPage(chatPage(`${chat.name} ${page + 1}/${pages.length}`, pages[page] ?? []))
+    // The plus says that scrolling up past the first page brings older messages.
+    return showPage(chatPage(`${chat.name} ${page + 1}/${pages.length}${more ? '+' : ''}`, pages[page] ?? []))
   }
 
   /** Runs one gateway round trip at a time; a gesture during one is dropped. */
@@ -240,11 +333,11 @@ export function createApp(options: AppOptions): App {
   function openInbox(box: Box): Promise<void> {
     return load(async () => {
       try {
-        // The counts give the real size of each box: the title of this one
-        // and, on the home box, the numbers on the links. A gateway without
-        // that answer leaves the numbers out and the title counts what is loaded.
+        // The counts give the real size of the box, for its title and for
+        // knowing when the list ends. A gateway without that answer leaves
+        // the title counting what is loaded.
         const [chats, counts] = await Promise.all([gateway.chats(BOX_FILTER[box]), gateway.counts().catch(() => null)])
-        const links = box === HOME ? homeLinks(counts) : []
+        const links = box === HOME ? HOME_LINKS.map((link) => BOX_TITLE[link]) : []
         const total = Math.max(chats.length, counts ? counts[BOX_COUNT[box]] : 0)
         const cursor = Math.max(0, chats.findIndex((chat) => chat.id === selectedId))
         screen = { name: 'inbox', box, chats, total, cursor, links }
@@ -262,23 +355,56 @@ export function createApp(options: AppOptions): App {
   }
 
   async function loadChat(box: Box, chat: Chat): Promise<void> {
-    {
-      screen = { name: 'chat', box, chat, pages: [], page: 0 }
-      try {
-        const conversation = await gateway.messages(chat.id)
-        const pages = chatBubbles(conversation.chat, conversation.messages)
-        // The last page holds the newest messages.
-        screen = { name: 'chat', box, chat: conversation.chat, pages, page: Math.max(0, pages.length - 1) }
-        await showChat()
-        log(`chat: ${conversation.messages.length} messages, ${pages.length} pages`)
-        if (conversation.chat.unread > 0) {
-          // Read on the glasses: it leaves the Unread box. WhatsApp is not told.
-          await gateway.markRead(chat.id).catch((error) => log(`mark read failed: ${describeError(error).detail}`))
-        }
-      } catch (error) {
-        await showFailure(error, CHAT_HINT)
+    screen = { name: 'chat', box, chat, messages: [], more: false, pages: [], page: 0 }
+    try {
+      const conversation = await gateway.messages(chat.id)
+      const { messages } = conversation
+      const pages = chatBubbles(messages)
+      // A full answer may have left older messages behind. The last page holds the newest ones.
+      const more = messages.length >= MESSAGE_LIMIT
+      screen = { name: 'chat', box, chat: conversation.chat, messages, more, pages, page: Math.max(0, pages.length - 1) }
+      await showChat()
+      log(`chat: ${messages.length} messages, ${pages.length} pages`)
+      if (conversation.chat.unread > 0) {
+        // Read on the glasses: it leaves the Unread box. WhatsApp is not told.
+        await gateway.markRead(chat.id).catch((error) => log(`mark read failed: ${describeError(error).detail}`))
       }
+    } catch (error) {
+      await showFailure(error, CHAT_HINT)
     }
+  }
+
+  /** Loads the messages before the oldest one loaded, when the selection scrolls up past the first page. */
+  function loadOlder(): void {
+    if (screen.name !== 'chat' || screen.reply || loading || !screen.more) return
+    const chatId = screen.chat.id
+    const oldest = screen.messages[0]
+    if (!oldest) return
+    void load(async () => {
+      try {
+        const { messages: older } = await gateway.messages(chatId, oldest)
+        if (screen.name !== 'chat' || screen.chat.id !== chatId || screen.reply) return
+        const known = new Set(screen.messages.map((message) => message.id))
+        const fresh = older.filter((message) => !known.has(message.id))
+        if (fresh.length === 0) {
+          screen = { ...screen, more: false }
+        } else {
+          const messages = [...fresh, ...screen.messages]
+          const pages = chatBubbles(messages)
+          // Pages fill from the end, so the ones already read keep their content,
+          // except that the first of them may have grown. Show that one if it
+          // did, the page before it otherwise.
+          const same = pages.length - screen.pages.length
+          const grown = JSON.stringify(pages[same]) !== JSON.stringify(screen.pages[0])
+          const page = Math.max(0, grown ? same : same - 1)
+          screen = { ...screen, messages, pages, page, more: older.length >= MESSAGE_LIMIT }
+        }
+        await showChat()
+        log(`chat: ${fresh.length} older messages, ${screen.pages.length} pages`)
+      } catch (error) {
+        log(`loading older messages failed: ${describeError(error).detail}`)
+      }
+    })
   }
 
   /** Scroll: moves the selection in a list, turns the page in a chat. No gateway call. */
@@ -293,7 +419,10 @@ export function createApp(options: AppOptions): App {
       if (cursor >= screen.chats.length - 1) loadMore()
     } else if (screen.name === 'chat' && !screen.reply) {
       const page = Math.max(0, Math.min(screen.pages.length - 1, screen.page + step))
-      if (page === screen.page) return
+      if (page === screen.page) {
+        if (step < 0) loadOlder()
+        return
+      }
       screen = { ...screen, page }
       void track(showChat())
     }
@@ -484,12 +613,17 @@ export function createApp(options: AppOptions): App {
   return {
     async start() {
       const rows = noteRows(`Loading chats...\n${gatewayUrl}`)
-      const result = await bridge.createStartUpPageContainer(startupInbox('Messenger', rows))
+      let result = await bridge.createStartUpPageContainer(startupInbox('Messenger', rows, markersOn))
+      if (result !== StartUpPageCreateResult.success && markersOn) {
+        markersOn = false
+        log('markers off: the glasses refused a start-up page with images')
+        result = await bridge.createStartUpPageContainer(startupInbox('Messenger', rows, false))
+      }
       if (result !== StartUpPageCreateResult.success) {
         log(`createStartUpPageContainer failed: ${StartUpPageCreateResult[result] ?? result}`)
         return
       }
-      inboxShown = { title: 'Messenger', rows }
+      inboxShown = { title: 'Messenger', rows, markers: markersOn }
       bridge.onEvenHubEvent(onEvent)
       await openInbox(HOME)
     },

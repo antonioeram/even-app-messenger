@@ -5,6 +5,7 @@ import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk'
 import { createApp } from './app'
 import { createDiagnostics } from './diagnostics'
 import { createGatewayClient, GatewayError, type GatewayClient } from './gateway'
+import { renderMarker } from './marker'
 
 const HEARTBEAT_MS = 5000
 
@@ -69,7 +70,7 @@ async function main(): Promise<void> {
   const bridge = await waitForEvenAppBridge()
   log('bridge ready')
 
-  const app = createApp({ bridge, gateway, gatewayUrl: gatewayUrl || '(gateway not set)', log })
+  const app = createApp({ bridge, gateway, gatewayUrl: gatewayUrl || '(gateway not set)', log, renderMarker })
   await app.start()
   log('ready')
 }

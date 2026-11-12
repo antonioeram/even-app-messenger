@@ -1,6 +1,7 @@
 // Package whatsapp links the gateway to a WhatsApp account as a companion
 // device (whatsmeow) and copies chats and messages into the message store.
-// Stage 1 is read-only: nothing here sends a message or a read receipt.
+// The only thing it sends is a reply that the user confirmed; it never sends
+// read receipts.
 package whatsapp
 
 import (
