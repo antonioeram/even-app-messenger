@@ -3,7 +3,6 @@
 
 import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk'
 import { createApp } from './app'
-import { renderAvatar } from './avatar'
 import { createDiagnostics } from './diagnostics'
 import { createGatewayClient, GatewayError, type GatewayClient } from './gateway'
 
@@ -70,7 +69,7 @@ async function main(): Promise<void> {
   const bridge = await waitForEvenAppBridge()
   log('bridge ready')
 
-  const app = createApp({ bridge, gateway, gatewayUrl: gatewayUrl || '(gateway not set)', log, renderAvatar })
+  const app = createApp({ bridge, gateway, gatewayUrl: gatewayUrl || '(gateway not set)', log })
   await app.start()
   log('ready')
 }

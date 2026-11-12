@@ -24,36 +24,24 @@ export const PAGE_LINE_BUDGET = 7
  */
 export function inboxRows(chats: readonly Chat[], cursor: number, links: readonly string[] = []): Row[] {
   const total = chats.length + links.length
-  // One screenful at a time: the boxes, and the avatars beside them, are
-  // redrawn only when the selection crosses to another page.
+  // One screenful at a time: moving the selection changes two boxes, and
+  // the others are redrawn only when it crosses to another page.
   const first = Math.floor(Math.max(0, cursor) / INBOX_ROWS) * INBOX_ROWS
   const rows: Row[] = []
   for (let index = first; index < Math.min(total, first + INBOX_ROWS); index += 1) {
     const selected = index === cursor
     const chat = chats[index]
     if (!chat) {
-      rows.push({ text: `${selected ? '>' : ' '} ${links[index - chats.length] ?? ''}`, selected, avatar: '' })
+      rows.push({ text: `${selected ? '>' : ' '} ${links[index - chats.length] ?? ''}`, selected })
       continue
     }
     const marker = selected ? '>' : chat.unread > 0 ? '*' : ' '
     const name = fitText(chat.name, INBOX_LINE_CHARS - 4 - chat.clock.length)
     const count = chat.unread > 0 ? ` (${chat.unread})` : ''
     const preview = fitText(oneLine(chat.preview), INBOX_LINE_CHARS - count.length) + count
-    rows.push({ text: `${marker} ${name}  ${chat.clock}${preview ? `\n${preview}` : ''}`, selected, avatar: initials(chat.name) })
+    rows.push({ text: `${marker} ${name}  ${chat.clock}${preview ? `\n${preview}` : ''}`, selected })
   }
   return rows
-}
-
-/**
- * Up to two capital letters for an avatar: the first letters of the first
- * and last word of a name. A name without letters (a phone number) gives '#'.
- */
-export function initials(name: string): string {
-  const words = name.split(/[^A-Za-z0-9]+/).filter((word) => /[A-Za-z]/.test(word))
-  const first = words[0]
-  if (!first) return '#'
-  const last = words.length > 1 ? words[words.length - 1] : undefined
-  return (first.charAt(0) + (last?.charAt(0) ?? '')).toUpperCase()
 }
 
 /** A message (loading, empty, failure) laid out in the inbox boxes, two lines per box. */
@@ -63,7 +51,7 @@ export function noteRows(text: string): Row[] {
   for (let index = 0; index < lines.length && rows.length < INBOX_ROWS; index += 2) {
     const last = rows.length === INBOX_ROWS - 1
     const pair = last ? [lines[index], lines.slice(index + 1).join(' ')] : lines.slice(index, index + 2)
-    rows.push({ text: pair.filter(Boolean).join('\n'), selected: true, avatar: '' })
+    rows.push({ text: pair.filter(Boolean).join('\n'), selected: true })
   }
   return rows
 }

@@ -14,8 +14,6 @@
 
 import {
   AudioInputSource,
-  ImageRawDataUpdate,
-  ImageRawDataUpdateResult,
   OsEventTypeList,
   StartUpPageCreateResult,
   type CreateStartUpPageContainer,
@@ -33,7 +31,6 @@ import {
 } from './gateway'
 import { gestureFromEvent, sourceFromEvent } from './gestures'
 import {
-  avatarSlot,
   chatPage,
   headUpdate,
   inboxPage,
@@ -51,8 +48,6 @@ export interface GlassesBridge {
   createStartUpPageContainer(container: CreateStartUpPageContainer): Promise<StartUpPageCreateResult>
   /** Replaces the whole page; needed when the layout changes. */
   rebuildPageContainer(container: RebuildPageContainer): Promise<boolean>
-  /** Sends the pixels of an image container. */
-  updateImageRawData(data: ImageRawDataUpdate): Promise<ImageRawDataUpdateResult>
   /** Changes the text of one container in place, without flicker. */
   textContainerUpgrade(container: TextContainerUpgrade): Promise<boolean>
   /** Switches the microphone; audio then arrives as audioEvent frames. */
@@ -68,12 +63,6 @@ export interface AppOptions {
   gatewayUrl: string
   /** Diagnostic lines for the phone page. */
   log: (line: string) => void
-  /**
-   * Draws a round avatar with the given initials and returns it as an encoded
-   * image; an empty string asks for a blank one. Without it the lists have no
-   * avatars.
-   */
-  renderAvatar?: (initials: string) => Promise<Uint8Array>
 }
 
 export interface App {
@@ -133,7 +122,7 @@ type Screen =
   | { name: 'chat'; box: Box; chat: Chat; pages: BubbleBox[][]; page: number; reply?: Reply }
 
 export function createApp(options: AppOptions): App {
-  const { bridge, gateway, gatewayUrl, log, renderAvatar } = options
+  const { bridge, gateway, gatewayUrl, log } = options
   const pending = new Set<Promise<unknown>>()
   let screen: Screen = { name: 'inboxText', box: HOME }
   let loading: Promise<void> | null = null
@@ -147,27 +136,6 @@ export function createApp(options: AppOptions): App {
     return promise
   }
 
-  /** False without a renderer, and after the glasses refused a page with image containers. */
-  let avatarsOn = Boolean(renderAvatar)
-  /** The initials each avatar slot shows on the current inbox page. */
-  let avatarShown: string[] = []
-
-  /** Sends the avatars that differ from what the slots show. Images go one at a time. */
-  async function drawAvatars(rows: readonly Row[]): Promise<void> {
-    if (!avatarsOn || !renderAvatar) return
-    for (const [index, row] of rows.entries()) {
-      if ((avatarShown[index] ?? '') === row.avatar) continue
-      // Recorded before sending: a failed image is not retried on every redraw.
-      avatarShown[index] = row.avatar
-      try {
-        const imageData = Array.from(await renderAvatar(row.avatar))
-        const result = await bridge.updateImageRawData(new ImageRawDataUpdate({ ...avatarSlot(index), imageData }))
-        if (result !== ImageRawDataUpdateResult.success) log(`avatar not shown: ${result}`)
-      } catch (error) {
-        log(`avatar not shown: ${error instanceof Error ? error.message : String(error)}`)
-      }
-    }
-  }
   /** What the inbox layout shows now; null while another layout is on the glasses. */
   let inboxShown: { title: string; rows: Row[] } | null = null
   /** Draw calls run one after another, so each sees what the previous one left on the glasses. */
@@ -189,14 +157,8 @@ export function createApp(options: AppOptions): App {
       const next = rows.slice(0, INBOX_ROWS)
       // The page has one box per row, so a different number of rows needs a new page.
       if (!inboxShown || inboxShown.rows.length !== next.length) {
-        let ok = await bridge.rebuildPageContainer(inboxPage(title, next, avatarsOn))
-        if (!ok && avatarsOn) {
-          avatarsOn = false
-          log('avatars off: the glasses refused a page with images')
-          ok = await bridge.rebuildPageContainer(inboxPage(title, next, false))
-        }
+        const ok = await bridge.rebuildPageContainer(inboxPage(title, next))
         if (!ok) log('rebuildPageContainer failed')
-        avatarShown = []
       } else {
         if (inboxShown.title !== title) await upgrade(headUpdate(title))
         for (const [index, row] of next.entries()) {
@@ -205,7 +167,6 @@ export function createApp(options: AppOptions): App {
         }
       }
       inboxShown = { title, rows: next }
-      await drawAvatars(next)
     })
   }
 
@@ -498,12 +459,7 @@ export function createApp(options: AppOptions): App {
   return {
     async start() {
       const rows = noteRows(`Loading chats...\n${gatewayUrl}`)
-      let result = await bridge.createStartUpPageContainer(startupInbox('Messenger', rows, avatarsOn))
-      if (result !== StartUpPageCreateResult.success && avatarsOn) {
-        avatarsOn = false
-        log('avatars off: the glasses refused a start-up page with images')
-        result = await bridge.createStartUpPageContainer(startupInbox('Messenger', rows, false))
-      }
+      const result = await bridge.createStartUpPageContainer(startupInbox('Messenger', rows))
       if (result !== StartUpPageCreateResult.success) {
         log(`createStartUpPageContainer failed: ${StartUpPageCreateResult[result] ?? result}`)
         return

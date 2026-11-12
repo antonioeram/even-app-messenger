@@ -9,7 +9,6 @@
 
 import {
   CreateStartUpPageContainer,
-  ImageContainerProperty,
   RebuildPageContainer,
   TextContainerProperty,
   TextContainerUpgrade,
@@ -30,11 +29,6 @@ export const INBOX_ROWS = 4
 const ROW_HEIGHT = 60
 const ROW_PITCH = 66
 
-/** Side of the round avatar to the left of each inbox box. */
-export const AVATAR_SIZE = 56
-const AVATAR_GAP = 6
-const AVATAR_FIRST_ID = HEAD.id + 1 + INBOX_ROWS
-
 export const BUBBLE_WIDTH = 440
 const LINE_HEIGHT = 27
 const BUBBLE_PADDING = 12
@@ -50,8 +44,6 @@ const BORDER = 9
 export interface Row {
   text: string
   selected: boolean
-  /** Initials for the avatar next to the box; empty for a row that is not a chat. */
-  avatar: string
 }
 
 /** One message bubble. lines is the number of text lines, which sets its height. */
@@ -119,45 +111,27 @@ const rowName = (index: number) => `row${index + 1}`
 
 const rowTop = (index: number) => HEAD_HEIGHT + index * ROW_PITCH
 
-/** Identity of the image container next to row index. */
-export function avatarSlot(index: number): { containerID: number; containerName: string } {
-  return { containerID: AVATAR_FIRST_ID + index, containerName: `avatar${index + 1}` }
-}
-
-function inboxBoxes(title: string, rows: readonly Row[], avatars: boolean): TextContainerProperty[] {
+function inboxBoxes(title: string, rows: readonly Row[]): TextContainerProperty[] {
   const boxes = [head(title)]
-  const left = avatars ? AVATAR_SIZE + AVATAR_GAP : 0
   // One box per row: a list shorter than the screen leaves the rest empty.
   rows.slice(0, INBOX_ROWS).forEach((row, index) => {
-    const frame = { x: left, y: rowTop(index), width: SCREEN.width - left, height: ROW_HEIGHT }
+    const frame = { x: 0, y: rowTop(index), width: SCREEN.width, height: ROW_HEIGHT }
     // Two lines of text need all the height a row has, so the padding is small.
     boxes.push(box(index, rowName(index), frame, row.text, row.selected, 2))
   })
   return boxes
 }
 
-/** Empty image containers, one per row; their pixels are sent after the page exists. */
-function avatarSlots(count: number): ImageContainerProperty[] {
-  return Array.from({ length: Math.min(count, INBOX_ROWS) }, (_, index) => {
-    const y = rowTop(index) + Math.floor((ROW_HEIGHT - AVATAR_SIZE) / 2)
-    return new ImageContainerProperty({ xPosition: 0, yPosition: y, width: AVATAR_SIZE, height: AVATAR_SIZE, ...avatarSlot(index) })
-  })
+/** The inbox layout as the start-up page. */
+export function startupInbox(title: string, rows: readonly Row[]): CreateStartUpPageContainer {
+  const textObject = inboxBoxes(title, rows)
+  return new CreateStartUpPageContainer({ containerTotalNum: textObject.length, textObject })
 }
 
-function inboxLayout(title: string, rows: readonly Row[], avatars: boolean) {
-  const textObject = inboxBoxes(title, rows, avatars)
-  const imageObject = avatars ? avatarSlots(rows.length) : []
-  return { containerTotalNum: textObject.length + imageObject.length, textObject, imageObject }
-}
-
-/** The inbox layout as the start-up page. avatars adds an image slot left of each box. */
-export function startupInbox(title: string, rows: readonly Row[], avatars = true): CreateStartUpPageContainer {
-  return new CreateStartUpPageContainer(inboxLayout(title, rows, avatars))
-}
-
-/** The inbox layout, for coming back from a chat. */
-export function inboxPage(title: string, rows: readonly Row[], avatars = true): RebuildPageContainer {
-  return new RebuildPageContainer(inboxLayout(title, rows, avatars))
+/** The inbox layout, for coming back from a chat or for a different number of rows. */
+export function inboxPage(title: string, rows: readonly Row[]): RebuildPageContainer {
+  const textObject = inboxBoxes(title, rows)
+  return new RebuildPageContainer({ containerTotalNum: textObject.length, textObject })
 }
 
 /** Changes one inbox box in place. */

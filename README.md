@@ -10,7 +10,7 @@ Screenshots are from the Even Hub simulator, with made-up data.
 
 ## What it does
 
-- **Unread box.** The home screen lists the chats with unread messages, four boxes per page: a round avatar with the person's initials, then name, time and the newest message.
+- **Unread box.** The home screen lists the chats with unread messages, four boxes per page: name, time and the newest message.
 - **Unanswered and All chats.** Two more boxes, listed on the home screen with the number of chats in each: read chats that still wait for your reply, and every chat.
 - **Reading.** A chat opens as message bubbles, theirs on the left and yours on the right, each with the sender's name and the time. It opens on the newest page; scroll up for older messages.
 - **Voice reply.** Hold the touchpad and speak. The recording is transcribed on your server and the text appears on the glasses. A click sends it; a double click cancels. Nothing is sent without that click.
@@ -25,7 +25,7 @@ Early, and built for one person's daily use.
 | Part | State |
 | --- | --- |
 | Gateway, WhatsApp link, history, live messages | Runs on a home server with a real account |
-| Lists with avatars, reading and ring input on real G2 glasses | Works |
+| Lists, reading and ring input on real G2 glasses | Works |
 | Transcription (Romanian and English) through the gateway | Tested with recorded speech |
 | Recording on the glasses and sending the reply | Covered by automated tests and the simulator; not yet confirmed on real glasses |
 
@@ -86,7 +86,7 @@ docker compose up -d --build
 curl -s http://127.0.0.1:8080/health
 ```
 
-The answer is `{"status":"ok","version":"0.6.0"}`.
+The answer is `{"status":"ok","version":"0.6.1"}`.
 
 ### 2. Put HTTPS in front of it
 
@@ -131,11 +131,11 @@ npx evenhub login
 ```
 
 ```bash
-npx evenhub create messenger-0.6.0.ehpk --name "Messenger" --tagline "Messages from your own server"
+npx evenhub create messenger-0.6.1.ehpk --name "Messenger" --tagline "Messages from your own server"
 ```
 
 ```bash
-npx evenhub promote 0.6.0 --to beta
+npx evenhub promote 0.6.1 --to beta
 ```
 
 ```bash
