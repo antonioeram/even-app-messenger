@@ -60,7 +60,7 @@ export function createDiagnostics(options: DiagnosticsOptions): Diagnostics {
     heartbeat() {
       const current = now()
       if (lastBeat !== null && current - lastBeat > heartbeatMs * 3) {
-        log(`JavaScript oprit ${seconds(current - lastBeat)} s`)
+        log(`JavaScript paused ${seconds(current - lastBeat)} s`)
       }
       lastBeat = current
       write(HEARTBEAT_KEY, String(current))
@@ -69,9 +69,9 @@ export function createDiagnostics(options: DiagnosticsOptions): Diagnostics {
     markColdStart() {
       const previous = Number(readItem(store, HEARTBEAT_KEY))
       if (Number.isFinite(previous) && previous > 0) {
-        log(`pornire la rece; rularea anterioara a fost activa acum ${seconds(now() - previous)} s`)
+        log(`cold start; previous run was alive ${seconds(now() - previous)} s ago`)
       } else {
-        log('prima pornire')
+        log('first start')
       }
     },
   }

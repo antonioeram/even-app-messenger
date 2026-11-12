@@ -68,9 +68,15 @@ func TestHelloReturnsTextWithHostAndServerTime(t *testing.T) {
 	}
 	body := decode(t, rec)
 	text, _ := body["text"].(string)
-	for _, want := range []string{"homelab", "09:41:07", "ăâîșț"} {
+	for _, want := range []string{"Hello from the gateway", "homelab", "09:41:07"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("text %q does not contain %q", text, want)
+		}
+	}
+	// The glasses font is not guaranteed to have non-ASCII glyphs.
+	for _, r := range text {
+		if r > 127 {
+			t.Errorf("text %q contains non-ASCII character %q", text, r)
 		}
 	}
 	if body["time"] != "2026-11-12T09:41:07Z" {

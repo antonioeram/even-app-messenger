@@ -34,16 +34,16 @@ export interface App {
   idle(): Promise<void>
 }
 
-// Glasses strings stay ASCII until stage 0 confirms which Romanian
-// glyphs the firmware font has; unknown glyphs are dropped silently.
-const HINT = 'Clic = reincarca | Dublu clic = iesire'
+// The app speaks English and its own strings stay ASCII: the firmware font
+// drops glyphs it does not have, without any error.
+const HINT = 'Click = reload | Double click = exit'
 
 const ERROR_LABEL: Record<GatewayErrorKind, string> = {
-  network: 'Retea / CORS / whitelist',
-  timeout: 'Fara raspuns',
-  unauthorized: 'Token respins (401)',
-  http: 'Eroare de server',
-  invalid: 'Raspuns neasteptat',
+  network: 'Network / CORS / whitelist',
+  timeout: 'No answer',
+  unauthorized: 'Token rejected (401)',
+  http: 'Server error',
+  invalid: 'Unexpected response',
 }
 
 export function createApp(options: AppOptions): App {
@@ -60,7 +60,7 @@ export function createApp(options: AppOptions): App {
 
   async function show(text: string): Promise<void> {
     const ok = await bridge.textContainerUpgrade(mainTextUpdate(text))
-    if (!ok) log('textContainerUpgrade a esuat')
+    if (!ok) log('textContainerUpgrade failed')
   }
 
   function refresh(): Promise<void> {
@@ -72,8 +72,8 @@ export function createApp(options: AppOptions): App {
           log('gateway ok')
         } catch (error) {
           const { label, detail } = describeError(error)
-          await show(`Gateway indisponibil\n${gatewayUrl}\n${label}: ${detail}\n\n${HINT}`)
-          log(`gateway eroare: ${label}: ${detail}`)
+          await show(`Gateway unreachable\n${gatewayUrl}\n${label}: ${detail}\n\n${HINT}`)
+          log(`gateway error: ${label}: ${detail}`)
         } finally {
           refreshing = null
         }
@@ -86,10 +86,10 @@ export function createApp(options: AppOptions): App {
     const gesture = gestureFromEvent(event)
     if (!gesture) {
       // Stage 0 needs to learn what real hardware sends; audio and IMU would flood the log.
-      if (!isStream(event)) log(`eveniment necunoscut: ${rawShape(event)}`)
+      if (!isStream(event)) log(`unknown event: ${rawShape(event)}`)
       return
     }
-    log(`gest: ${gesture}`)
+    log(`gesture: ${gesture}`)
     switch (gesture) {
       case 'click':
       case 'foregroundEnter':
@@ -97,7 +97,7 @@ export function createApp(options: AppOptions): App {
         break
       case 'doubleClick':
         // Mode 1 shows the system exit dialog, which the root page must use.
-        void track(bridge.shutDownPageContainer(1)).catch((error) => log(`iesire esuata: ${String(error)}`))
+        void track(bridge.shutDownPageContainer(1)).catch((error) => log(`exit failed: ${String(error)}`))
         break
       default:
         break
@@ -107,10 +107,10 @@ export function createApp(options: AppOptions): App {
   return {
     async start() {
       const result = await bridge.createStartUpPageContainer(
-        startupPage(`Messenger\nConectare la gateway...\n${gatewayUrl}`),
+        startupPage(`Messenger\nConnecting to gateway...\n${gatewayUrl}`),
       )
       if (result !== StartUpPageCreateResult.success) {
-        log(`createStartUpPageContainer a esuat: ${StartUpPageCreateResult[result] ?? result}`)
+        log(`createStartUpPageContainer failed: ${StartUpPageCreateResult[result] ?? result}`)
         return
       }
       bridge.onEvenHubEvent(onEvent)
@@ -136,5 +136,5 @@ function rawShape(event: EvenHubEvent): string {
 
 function describeError(error: unknown): { label: string; detail: string } {
   if (error instanceof GatewayError) return { label: ERROR_LABEL[error.kind], detail: error.message }
-  return { label: 'Eroare', detail: error instanceof Error ? error.message : String(error) }
+  return { label: 'Error', detail: error instanceof Error ? error.message : String(error) }
 }

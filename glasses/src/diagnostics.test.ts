@@ -77,7 +77,7 @@ describe('diagnostics', () => {
     time.advance(5 * 60_000)
     diag.heartbeat()
 
-    expect(diag.lines().join('\n')).toContain('300 s')
+    expect(diag.lines().join('\n')).toContain('JavaScript paused 300 s')
   })
 
   it('reports the gap since the last heartbeat of the previous run after a cold start', () => {
@@ -88,6 +88,6 @@ describe('diagnostics', () => {
     const restarted = createDiagnostics({ store, now: () => T0 + 120_000, heartbeatMs: 5000 })
     restarted.markColdStart()
 
-    expect(restarted.lines().join('\n')).toContain('120 s')
+    expect(restarted.lines().join('\n')).toContain('cold start; previous run was alive 120 s ago')
   })
 })

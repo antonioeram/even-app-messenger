@@ -49,7 +49,7 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
     try {
       response = await fetchFn(`${baseUrl}${path}`, { headers, signal: controller.signal, cache: 'no-store' })
     } catch (error) {
-      if (timedOut) throw new GatewayError('timeout', `fara raspuns in ${Math.round(timeoutMs / 1000)} s`)
+      if (timedOut) throw new GatewayError('timeout', `no answer in ${Math.round(timeoutMs / 1000)} s`)
       // A blocked whitelist entry, a CORS failure, DNS and "offline" all end here:
       // the WebView does not say which one it was.
       throw new GatewayError('network', error instanceof Error ? error.message : String(error))
@@ -57,13 +57,13 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
       clearTimeout(timer)
     }
 
-    if (response.status === 401) throw new GatewayError('unauthorized', 'token lipsa sau gresit')
+    if (response.status === 401) throw new GatewayError('unauthorized', 'missing or wrong token')
     if (!response.ok) throw new GatewayError('http', `HTTP ${response.status}`)
 
     try {
       return await response.json()
     } catch {
-      throw new GatewayError('invalid', 'raspunsul nu este JSON')
+      throw new GatewayError('invalid', 'response is not JSON')
     }
   }
 
@@ -71,7 +71,7 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
     async hello() {
       const body = await getJson('/hello')
       if (!isRecord(body) || typeof body.text !== 'string') {
-        throw new GatewayError('invalid', 'raspuns fara camp text')
+        throw new GatewayError('invalid', 'response has no text field')
       }
       return { text: body.text, time: typeof body.time === 'string' ? body.time : '' }
     },

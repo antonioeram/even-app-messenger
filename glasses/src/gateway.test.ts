@@ -118,6 +118,9 @@ describe('gateway client', () => {
       })
     const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn, timeoutMs: 20 })
 
-    expect((await failure(client.hello())).kind).toBe('timeout')
+    const error = await failure(client.hello())
+
+    expect(error.kind).toBe('timeout')
+    expect(error.message).toContain('no answer')
   })
 })

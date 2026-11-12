@@ -91,6 +91,7 @@ describe('glasses app', () => {
     await app.start()
 
     expect(bridge.created).toHaveLength(1)
+    expect(bridge.created[0]).toContain('Connecting')
     expect(bridge.created[0]).toContain('gw.example')
   })
 
@@ -107,6 +108,7 @@ describe('glasses app', () => {
 
     await app.start()
 
+    expect(bridge.shown).toContain('Gateway unreachable')
     expect(bridge.shown).toContain('Failed to fetch')
     expect(bridge.shown).toContain('gw.example')
   })
@@ -197,7 +199,7 @@ describe('glasses app', () => {
     bridge.emit(click)
     await app.idle()
 
-    expect(logs).toContain('gest: click')
+    expect(logs).toContain('gesture: click')
   })
 
   it('logs the raw shape of an event it does not recognise', async () => {
@@ -206,7 +208,7 @@ describe('glasses app', () => {
 
     bridge.emit({ jsonData: { eventType: 99, somethingNew: true } })
 
-    expect(logs.join('\n')).toContain('eveniment necunoscut: {"eventType":99,"somethingNew":true}')
+    expect(logs.join('\n')).toContain('unknown event: {"eventType":99,"somethingNew":true}')
   })
 
   it('does not log audio frames', async () => {
@@ -217,6 +219,14 @@ describe('glasses app', () => {
     bridge.emit({ audioEvent: new AudioEvent({ audioPcm: new Uint8Array(4) }) })
 
     expect(logs).toHaveLength(before)
+  })
+
+  it('shows only ASCII text of its own on the glasses', async () => {
+    const { bridge, app } = setup(gatewayReturning(new GatewayError('timeout', 'no answer in 8 s')))
+
+    await app.start()
+
+    expect([...bridge.created, ...bridge.upgrades].join('')).toMatch(/^[\x00-\x7F]*$/)
   })
 
   it('never sends more text than textContainerUpgrade accepts', async () => {

@@ -38,7 +38,7 @@ npm run dev
 npm run simulate             # în alt terminal
 ```
 
-În simulator: clic reîncarcă textul, dublu clic cere ieșirea.
+În simulator: clic reîncarcă textul, dublu clic cere ieșirea. Interfața aplicației este în engleză.
 
 ## Pe ochelarii reali
 

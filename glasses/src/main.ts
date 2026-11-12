@@ -18,8 +18,8 @@ function element(id: string): HTMLElement {
 }
 
 const logView = element('log')
-element('gateway-url').textContent = gatewayUrl || '(nesetat)'
-element('build').textContent = `v${__APP_VERSION__}${gatewayToken ? ' · cu token' : ' · fara token'}`
+element('gateway-url').textContent = gatewayUrl || '(not set)'
+element('build').textContent = `v${__APP_VERSION__}${gatewayToken ? ' · with token' : ' · no token'}`
 
 const diagnostics = createDiagnostics({
   store: window.localStorage,
@@ -40,7 +40,7 @@ const gateway: GatewayClient = gatewayUrl
   ? createGatewayClient({ baseUrl: gatewayUrl, token: gatewayToken || undefined })
   : {
       async hello() {
-        throw new GatewayError('invalid', 'VITE_GATEWAY_URL nu a fost setat la build')
+        throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
       },
     }
 
@@ -48,17 +48,17 @@ async function main(): Promise<void> {
   render(diagnostics.lines())
   diagnostics.markColdStart()
   setInterval(() => diagnostics.heartbeat(), HEARTBEAT_MS)
-  document.addEventListener('visibilitychange', () => log(`pagina ${document.visibilityState}`))
+  document.addEventListener('visibilitychange', () => log(`page ${document.visibilityState}`))
 
-  log('astept bridge-ul Even')
+  log('waiting for the Even bridge')
   const bridge = await waitForEvenAppBridge()
-  log('bridge pregatit')
+  log('bridge ready')
 
-  const app = createApp({ bridge, gateway, gatewayUrl: gatewayUrl || '(gateway nesetat)', log })
+  const app = createApp({ bridge, gateway, gatewayUrl: gatewayUrl || '(gateway not set)', log })
   await app.start()
   log('ready')
 }
 
 main().catch((error: unknown) => {
-  log(`eroare la pornire: ${error instanceof Error ? error.message : String(error)}`)
+  log(`start-up error: ${error instanceof Error ? error.message : String(error)}`)
 })

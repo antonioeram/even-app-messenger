@@ -34,7 +34,7 @@ Citit pe 12 noiembrie 2026 din [documentația Even Hub](https://hub.evenrealitie
 - Cel mult 4 containere de imagine și 8 de alt tip pe pagină. Exact unul are `isEventCapture: 1`.
 - Limite de text: 1000 de caractere la `createStartUpPageContainer` și `rebuildPageContainer`, 2000 la `textContainerUpgrade`. Un container pe tot ecranul arată circa 400–500 de caractere; restul se derulează dacă acel container captează evenimentele.
 - Liste: cel mult 20 de elemente, 64 de caractere fiecare, fără actualizare pe loc.
-- Un singur font, fără dimensiuni, fără aliniere. Caracterele care lipsesc din font sunt eliminate fără eroare. Prezența diacriticelor românești se verifică în etapa 0.
+- Un singur font, fără dimensiuni, fără aliniere. Caracterele care lipsesc din font sunt eliminate fără eroare. De aceea interfața aplicației este în engleză, doar cu caractere ASCII, iar textul mesajelor se afișează fără diacritice.
 - `textContainerUpgrade` actualizează fără pâlpâire; `rebuildPageContainer` redesenează tot și șterge meniul dacă `menuObject` lipsește.
 - Pe pagina principală ieșirea se face cu `shutDownPageContainer(1)`, care arată dialogul de sistem.
 

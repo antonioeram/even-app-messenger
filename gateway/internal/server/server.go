@@ -47,14 +47,12 @@ func New(cfg config.Config, opts Options) http.Handler {
 }
 
 // helloText is the stage 0 payload shown on the glasses. It carries the
-// server name and time so it is obvious the text came from the gateway, and
-// a diacritics line to check which Romanian glyphs the firmware font has.
+// server name and time so it is obvious the text came from the gateway.
 func helloText(hostname string, now time.Time) string {
 	return strings.Join([]string{
-		"Salut de la gateway!",
+		"Hello from the gateway!",
 		"Server: " + hostname,
-		"Ora: " + now.Format("2006-01-02 15:04:05"),
-		"Diacritice: ăâîșț ĂÂÎȘȚ",
+		"Time: " + now.Format("2006-01-02 15:04:05"),
 	}, "\n")
 }
 

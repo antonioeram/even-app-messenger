@@ -42,7 +42,7 @@ Varianta A nu validează whitelist-ul și nu supraviețuiește blocării telefon
 cd glasses
 npm run pack
 npx evenhub login
-npx evenhub create messenger-0.0.1.ehpk --name "Messenger" --tagline "Mesaje de pe serverul tau"
+npx evenhub create messenger-0.0.1.ehpk --name "Messenger" --tagline "Messages from your own server"
 npx evenhub promote 0.0.1 --to beta
 npx evenhub testers add <emailul contului tău Even>
 ```
@@ -55,14 +55,15 @@ Pagina aplicației de pe telefon arată un jurnal; cele mai noi rânduri sunt su
 
 | # | Verificare | Cum | Ce raportezi |
 | --- | --- | --- | --- |
-| 1 | Textul ajunge pe ochelari | Deschizi aplicația | Apare „Salut de la gateway!” cu ora serverului, sau textul erorii |
-| 2 | Diacritice | Rândul „Diacritice: ăâîșț ĂÂÎȘȚ” | Ce litere lipsesc sau apar greșit |
-| 3 | Whitelist (varianta B) | Aplicația instalată din beta | Dacă textul apare; dacă nu, rândul de eroare din jurnal |
-| 4 | Originea WebView-ului | Jurnalul gateway-ului, câmpul `origin` | Valoarea exactă, pentru variantele A și B |
-| 5 | Gesturi | Clic, dublu clic, derulare, apăsare lungă | Rândurile `gest: …` sau `eveniment necunoscut: …` din jurnal |
-| 6 | Ieșire | Dublu clic | Apare dialogul de sistem pentru ieșire |
-| 7 | Telefon blocat (varianta B) | Blochezi telefonul 5 minute, apoi deschizi aplicația Even | Rândurile noi din jurnal: `JavaScript oprit N s`, `pornire la rece…`, `gest: foregroundEnter`; dacă textul se reîncarcă singur |
-| 8 | Fără VPN | Oprești VPN-ul, clic | Textul erorii de pe ochelari |
+| 1 | Textul ajunge pe ochelari | Deschizi aplicația | Apare „Hello from the gateway!” cu ora serverului, sau textul erorii |
+| 2 | Whitelist (varianta B) | Aplicația instalată din beta | Dacă textul apare; dacă nu, rândul de eroare din jurnal |
+| 3 | Originea WebView-ului | Jurnalul gateway-ului, câmpul `origin` | Valoarea exactă, pentru variantele A și B |
+| 4 | Gesturi | Clic, dublu clic, derulare, apăsare lungă | Rândurile `gesture: …` sau `unknown event: …` din jurnal |
+| 5 | Ieșire | Dublu clic | Apare dialogul de sistem pentru ieșire |
+| 6 | Telefon blocat (varianta B) | Blochezi telefonul 5 minute, apoi deschizi aplicația Even | Rândurile noi din jurnal: `JavaScript paused N s`, `cold start…`, `gesture: foregroundEnter`; dacă textul se reîncarcă singur |
+| 7 | Fără VPN | Oprești VPN-ul, clic | Textul erorii de pe ochelari |
+
+Interfața aplicației este în engleză și folosește doar caractere ASCII. Diacriticele nu se verifică: textul mesajelor va fi afișat fără diacritice, începând cu etapa 1.
 
 ## Întrebări lămurite din documentație
 
