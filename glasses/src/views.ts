@@ -6,17 +6,24 @@
 import type { Chat, Message } from './gateway'
 import { fitText } from './screen'
 
-// Limits of a list container, from the Even Hub display docs.
-export const LIST_MAX_ITEMS = 20
-export const LIST_ITEM_CHARS = 64
+// The inbox is drawn as text, one chat per line, with a marker on the
+// selected one. A native list container did not render on real glasses
+// (build 0.1.0), while text updates are proven there.
+/** Chats visible at once; with the header they fill most of the 288 px screen. */
+export const INBOX_ROWS = 7
+/** Longest row, marker included; short enough not to wrap. */
+export const INBOX_ROW_CHARS = 44
 
-/** One line per chat for the inbox list, in the order given. */
-export function inboxItems(chats: readonly Chat[]): string[] {
-  return chats.slice(0, LIST_MAX_ITEMS).map((chat) => {
+/** The inbox screen: a position header, then a window of rows around the cursor. */
+export function inboxText(chats: readonly Chat[], cursor: number): string {
+  const first = Math.max(0, Math.min(cursor - Math.floor(INBOX_ROWS / 2), chats.length - INBOX_ROWS))
+  const rows = chats.slice(first, first + INBOX_ROWS).map((chat, offset) => {
+    const marker = first + offset === cursor ? '> ' : '  '
     const unread = chat.unread > 0 ? `(${chat.unread}) ` : ''
     const preview = oneLine(chat.preview)
-    return fitText(`${unread}${chat.name}${preview ? `: ${preview}` : ''}`, LIST_ITEM_CHARS)
+    return fitText(`${marker}${unread}${chat.name}${preview ? `: ${preview}` : ''}`, INBOX_ROW_CHARS)
   })
+  return [`Inbox ${cursor + 1}/${chats.length}`, ...rows].join('\n')
 }
 
 /**

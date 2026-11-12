@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Chat, Message } from './gateway'
-import { chatText, inboxItems, LIST_ITEM_CHARS, LIST_MAX_ITEMS } from './views'
+import { chatText, INBOX_ROW_CHARS, INBOX_ROWS, inboxText } from './views'
 
 const chat = (over: Partial<Chat> = {}): Chat => ({
   id: 'a@s.whatsapp.net',
@@ -21,32 +21,52 @@ const message = (over: Partial<Message> = {}): Message => ({
   ...over,
 })
 
-describe('inboxItems', () => {
-  it('shows name and preview', () => {
-    expect(inboxItems([chat()])).toEqual(['Ana Pop: Vii maine?'])
+describe('inboxText', () => {
+  const chats = (n: number) => Array.from({ length: n }, (_, i) => chat({ id: `c${i}`, name: `Chat ${i}`, preview: 'hi' }))
+
+  it('shows a position header and one line per chat, with a marker on the selected one', () => {
+    expect(inboxText([chat(), chat({ id: 'b', name: 'Familia', preview: 'ok' })], 1).split('\n')).toEqual([
+      'Inbox 2/2',
+      '  Ana Pop: Vii maine?',
+      '> Familia: ok',
+    ])
   })
 
   it('marks unread chats with their count', () => {
-    expect(inboxItems([chat({ unread: 3 })])).toEqual(['(3) Ana Pop: Vii maine?'])
+    expect(inboxText([chat({ unread: 3 })], 0)).toContain('> (3) Ana Pop: Vii maine?')
   })
 
-  it('keeps every item within the list limit', () => {
-    const [item] = inboxItems([chat({ preview: 'x'.repeat(200) })])
-    expect(item).toHaveLength(LIST_ITEM_CHARS)
-    expect(item?.endsWith('...')).toBe(true)
+  it('keeps every row on one screen line', () => {
+    const rows = inboxText([chat({ preview: 'x'.repeat(200) })], 0).split('\n')
+    expect(rows[1]).toHaveLength(INBOX_ROW_CHARS)
+    expect(rows[1]?.endsWith('...')).toBe(true)
   })
 
   it('puts a multi-line preview on one line', () => {
-    expect(inboxItems([chat({ preview: 'unu\ndoi' })])).toEqual(['Ana Pop: unu doi'])
-  })
-
-  it('shows at most the number of items a list can hold', () => {
-    const many = Array.from({ length: 30 }, (_, i) => chat({ id: `c${i}` }))
-    expect(inboxItems(many)).toHaveLength(LIST_MAX_ITEMS)
+    expect(inboxText([chat({ preview: 'unu\ndoi' })], 0)).toContain('> Ana Pop: unu doi')
   })
 
   it('shows the name alone when there is no preview', () => {
-    expect(inboxItems([chat({ preview: '' })])).toEqual(['Ana Pop'])
+    expect(inboxText([chat({ preview: '' })], 0).split('\n')[1]).toBe('> Ana Pop')
+  })
+
+  it('shows a window of rows that fits the screen', () => {
+    const rows = inboxText(chats(20), 0).split('\n')
+    expect(rows).toHaveLength(1 + INBOX_ROWS)
+    expect(rows[1]).toBe('> Chat 0: hi')
+  })
+
+  it('scrolls the window so the selected chat stays visible', () => {
+    const text = inboxText(chats(20), 12)
+    expect(text).toContain('Inbox 13/20')
+    expect(text).toContain('> Chat 12: hi')
+    expect(text.split('\n')).toHaveLength(1 + INBOX_ROWS)
+  })
+
+  it('keeps a full window at the end of the list', () => {
+    const rows = inboxText(chats(20), 19).split('\n')
+    expect(rows).toHaveLength(1 + INBOX_ROWS)
+    expect(rows.at(-1)).toBe('> Chat 19: hi')
   })
 })
 

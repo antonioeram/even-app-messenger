@@ -1,7 +1,8 @@
 // Stage 1 app: an inbox list of WhatsApp chats and a reading screen.
 //
-// Inbox:  scroll moves the selection (done by the firmware), click opens the
-//         chat, double click asks to exit.
+// Every screen is text in one container, updated in place.
+// Inbox:  scroll moves the selection, click opens the chat, double click
+//         asks to exit.
 // Chat:   click reloads, double click goes back to the inbox.
 
 import {
@@ -9,17 +10,17 @@ import {
   StartUpPageCreateResult,
   type CreateStartUpPageContainer,
   type EvenHubEvent,
-  type RebuildPageContainer,
+  type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
 import { GatewayError, type Chat, type GatewayClient, type GatewayErrorKind } from './gateway'
 import { gestureFromEvent, sourceFromEvent } from './gestures'
-import { listPage, MAX_CREATE_CHARS, startupPage, textPage } from './screen'
-import { chatText, inboxItems } from './views'
+import { mainTextUpdate, MAX_UPGRADE_CHARS, startupPage } from './screen'
+import { chatText, inboxText } from './views'
 
 /** The part of EvenAppBridge the app uses; tests supply a fake. */
 export interface GlassesBridge {
   createStartUpPageContainer(container: CreateStartUpPageContainer): Promise<StartUpPageCreateResult>
-  rebuildPageContainer(container: RebuildPageContainer): Promise<boolean>
+  textContainerUpgrade(container: TextContainerUpgrade): Promise<boolean>
   shutDownPageContainer(exitMode?: number): Promise<boolean>
   onEvenHubEvent(callback: (event: EvenHubEvent) => void): () => void
 }
@@ -53,9 +54,9 @@ const ERROR_LABEL: Record<GatewayErrorKind, string> = {
 }
 
 type Screen =
-  /** The list is on the glasses; chats are its items, in order. */
-  | { name: 'inbox'; chats: Chat[] }
-  /** A text is shown instead of the list: loading, empty or failed. */
+  /** The chat list is shown; cursor is the index of the selected chat. */
+  | { name: 'inbox'; chats: Chat[]; cursor: number }
+  /** A message is shown instead of the list: loading, empty or failed. */
   | { name: 'inboxText' }
   | { name: 'chat'; chat: Chat }
 
@@ -64,6 +65,8 @@ export function createApp(options: AppOptions): App {
   const pending = new Set<Promise<unknown>>()
   let screen: Screen = { name: 'inboxText' }
   let loading: Promise<void> | null = null
+  /** The chat to select when the inbox is shown again. */
+  let selectedId: string | null = null
 
   function track<T>(promise: Promise<T>): Promise<T> {
     pending.add(promise)
@@ -72,9 +75,9 @@ export function createApp(options: AppOptions): App {
     return promise
   }
 
-  async function show(page: RebuildPageContainer): Promise<void> {
-    const ok = await bridge.rebuildPageContainer(page)
-    if (!ok) log('rebuildPageContainer failed')
+  async function show(text: string): Promise<void> {
+    const ok = await bridge.textContainerUpgrade(mainTextUpdate(text))
+    if (!ok) log('textContainerUpgrade failed')
   }
 
   /** Runs one gateway round trip at a time; a gesture during one is dropped. */
@@ -90,7 +93,7 @@ export function createApp(options: AppOptions): App {
   async function showFailure(error: unknown, hint: string): Promise<void> {
     const { label, detail } = describeError(error)
     log(`gateway error: ${label}: ${detail}`)
-    await show(textPage(`Gateway unreachable\n${gatewayUrl}\n${label}: ${detail}\n\n${hint}`))
+    await show(`Gateway unreachable\n${gatewayUrl}\n${label}: ${detail}\n\n${hint}`)
   }
 
   function openInbox(): Promise<void> {
@@ -99,10 +102,11 @@ export function createApp(options: AppOptions): App {
         const chats = await gateway.chats()
         if (chats.length === 0) {
           screen = { name: 'inboxText' }
-          await show(textPage(`No chats yet\nLink WhatsApp at\n${gatewayUrl}/admin\n\n${INBOX_HINT}`))
+          await show(`No chats yet\nLink WhatsApp at\n${gatewayUrl}/admin\n\n${INBOX_HINT}`)
         } else {
-          screen = { name: 'inbox', chats }
-          await show(listPage(inboxItems(chats)))
+          const cursor = Math.max(0, chats.findIndex((chat) => chat.id === selectedId))
+          screen = { name: 'inbox', chats, cursor }
+          await show(inboxText(chats, cursor))
         }
         log(`inbox: ${chats.length} chats`)
       } catch (error) {
@@ -118,7 +122,7 @@ export function createApp(options: AppOptions): App {
       try {
         const conversation = await gateway.messages(chat.id)
         screen = { name: 'chat', chat: conversation.chat }
-        await show(textPage(chatText(conversation.chat, conversation.messages, MAX_CREATE_CHARS)))
+        await show(chatText(conversation.chat, conversation.messages, MAX_UPGRADE_CHARS))
         log(`chat: ${conversation.messages.length} messages`)
       } catch (error) {
         await showFailure(error, CHAT_HINT)
@@ -126,31 +130,24 @@ export function createApp(options: AppOptions): App {
     })
   }
 
-  /** The chat a list event points at; the host drops zero values, so no index means the first item. */
-  function selectedChat(chats: Chat[], event: EvenHubEvent): Chat | undefined {
-    const list = event.listEvent
-    if (!list) return undefined
-    if (list.currentSelectItemIndex !== undefined) {
-      const chat = chats[list.currentSelectItemIndex]
-      if (!chat) log(`no chat at index ${list.currentSelectItemIndex}`)
-      return chat
-    }
-    if (list.currentSelectItemName) {
-      const index = inboxItems(chats).indexOf(list.currentSelectItemName)
-      if (index >= 0) return chats[index]
-    }
-    return chats[0]
+  /** Moves the inbox selection; a redraw only, no gateway call. */
+  function moveCursor(step: number): void {
+    if (screen.name !== 'inbox') return
+    const cursor = Math.max(0, Math.min(screen.chats.length - 1, screen.cursor + step))
+    if (cursor === screen.cursor) return
+    screen = { ...screen, cursor }
+    selectedId = screen.chats[cursor]?.id ?? null
+    void track(show(inboxText(screen.chats, cursor)))
   }
 
-  function onClick(event: EvenHubEvent): void {
+  function onClick(): void {
     switch (screen.name) {
       case 'inbox': {
-        if (!event.listEvent) {
-          log('click without a list selection')
-          return
+        const chat = screen.chats[screen.cursor]
+        if (chat) {
+          selectedId = chat.id
+          void openChat(chat)
         }
-        const chat = selectedChat(screen.chats, event)
-        if (chat) void openChat(chat)
         return
       }
       case 'inboxText':
@@ -173,7 +170,13 @@ export function createApp(options: AppOptions): App {
     log(`gesture: ${source ? `${gesture} (${source})` : gesture}`)
     switch (gesture) {
       case 'click':
-        onClick(event)
+        onClick()
+        break
+      case 'scrollDown':
+        moveCursor(1)
+        break
+      case 'scrollUp':
+        moveCursor(-1)
         break
       case 'doubleClick':
         if (screen.name === 'chat') {

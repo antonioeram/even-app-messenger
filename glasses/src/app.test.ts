@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   AudioEvent,
   EventSourceType,
-  List_ItemEvent,
   OsEventTypeList,
   StartUpPageCreateResult,
   Sys_ItemEvent,
@@ -11,52 +10,33 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { createApp, type GlassesBridge } from './app'
 import { GatewayError, type Chat, type Conversation, type GatewayClient, type Message } from './gateway'
-import { INBOX_CONTAINER, MAIN_CONTAINER } from './screen'
-
-type Page = { kind: 'list'; items: string[] } | { kind: 'text'; content: string }
-
-type PageInput = {
-  containerTotalNum?: number
-  textObject?: { content?: string; isEventCapture?: number; containerID?: number; containerName?: string }[]
-  listObject?: {
-    isEventCapture?: number
-    containerID?: number
-    containerName?: string
-    itemContainer?: { itemCount?: number; itemName?: string[] }
-  }[]
-}
+import { MAIN_CONTAINER, MAX_UPGRADE_CHARS } from './screen'
 
 class FakeBridge implements GlassesBridge {
-  pages: Page[] = []
+  created: string[] = []
+  upgrades: string[] = []
   shutdowns: number[] = []
   createResult = StartUpPageCreateResult.success
   private listener: ((event: EvenHubEvent) => void) | null = null
 
-  private record(container: PageInput) {
-    expect(container.containerTotalNum).toBe(1)
-    const list = container.listObject?.[0]
-    if (list) {
-      expect(list.isEventCapture).toBe(1)
-      expect(list.containerID).toBe(INBOX_CONTAINER.id)
-      expect(list.containerName).toBe(INBOX_CONTAINER.name)
-      expect(list.itemContainer?.itemCount).toBe(list.itemContainer?.itemName?.length)
-      this.pages.push({ kind: 'list', items: list.itemContainer?.itemName ?? [] })
-      return
-    }
+  async createStartUpPageContainer(container: {
+    containerTotalNum?: number
+    textObject?: { content?: string; isEventCapture?: number; containerID?: number; containerName?: string }[]
+  }) {
     const text = container.textObject?.[0]
+    expect(container.containerTotalNum).toBe(1)
     expect(text?.isEventCapture).toBe(1)
     expect(text?.containerID).toBe(MAIN_CONTAINER.id)
     expect(text?.containerName).toBe(MAIN_CONTAINER.name)
-    this.pages.push({ kind: 'text', content: text?.content ?? '' })
-  }
-
-  async createStartUpPageContainer(container: PageInput) {
-    this.record(container)
+    this.created.push(text?.content ?? '')
     return this.createResult
   }
 
-  async rebuildPageContainer(container: PageInput) {
-    this.record(container)
+  async textContainerUpgrade(upgrade: { containerID?: number; containerName?: string; content?: string }) {
+    expect(upgrade.containerID).toBe(MAIN_CONTAINER.id)
+    expect(upgrade.containerName).toBe(MAIN_CONTAINER.name)
+    expect((upgrade.content ?? '').length).toBeLessThanOrEqual(MAX_UPGRADE_CHARS)
+    this.upgrades.push(upgrade.content ?? '')
     return true
   }
 
@@ -76,23 +56,13 @@ class FakeBridge implements GlassesBridge {
     this.listener?.(event)
   }
 
-  get page(): Page {
-    const last = this.pages.at(-1)
-    if (!last) throw new Error('no page was shown')
-    return last
-  }
-
-  /** Text of the current page; fails the test when a list is shown. */
+  /** What the glasses show now. */
   get text(): string {
-    const page = this.page
-    if (page.kind !== 'text') throw new Error(`expected a text page, got a list: ${page.items.join(' | ')}`)
-    return page.content
+    return this.upgrades.at(-1) ?? this.created.at(-1) ?? ''
   }
 
-  get items(): string[] {
-    const page = this.page
-    if (page.kind !== 'list') throw new Error(`expected a list page, got text: ${page.content}`)
-    return page.items
+  get lines(): string[] {
+    return this.text.split('\n')
   }
 }
 
@@ -133,12 +103,8 @@ function fakeGateway(options: { chats?: Step<Chat[]>[]; messages?: Step<Message[
   return gateway satisfies GatewayClient
 }
 
-const select = (index?: number, name?: string): EvenHubEvent => ({
-  listEvent: new List_ItemEvent({ currentSelectItemIndex: index, currentSelectItemName: name }),
-})
-const listDoubleClick: EvenHubEvent = {
-  listEvent: new List_ItemEvent({ eventType: OsEventTypeList.DOUBLE_CLICK_EVENT }),
-}
+const scrollDown: EvenHubEvent = { textEvent: new Text_ItemEvent({ eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT }) }
+const scrollUp: EvenHubEvent = { textEvent: new Text_ItemEvent({ eventType: OsEventTypeList.SCROLL_TOP_EVENT }) }
 const click: EvenHubEvent = { textEvent: new Text_ItemEvent({ eventType: OsEventTypeList.CLICK_EVENT }) }
 const doubleClick: EvenHubEvent = {
   textEvent: new Text_ItemEvent({ eventType: OsEventTypeList.DOUBLE_CLICK_EVENT }),
@@ -163,10 +129,12 @@ function setup(gateway: GatewayClient = fakeGateway()) {
   return { bridge, app, logs }
 }
 
+/** Starts the app, moves the cursor down `index` times and clicks. */
 async function openChat(index = 0, gateway = fakeGateway()) {
   const context = setup(gateway)
   await context.app.start()
-  context.bridge.emit(select(index))
+  for (let i = 0; i < index; i += 1) context.bridge.emit(scrollDown)
+  context.bridge.emit(click)
   await context.app.idle()
   return { ...context, gateway }
 }
@@ -177,8 +145,9 @@ describe('start-up', () => {
 
     await app.start()
 
-    expect(bridge.pages[0]).toEqual({ kind: 'text', content: expect.stringContaining('Loading') })
-    expect(bridge.pages[0]).toEqual({ kind: 'text', content: expect.stringContaining('gw.example') })
+    expect(bridge.created).toHaveLength(1)
+    expect(bridge.created[0]).toContain('Loading')
+    expect(bridge.created[0]).toContain('gw.example')
   })
 
   it('stops with a log line when the start-up page cannot be created', async () => {
@@ -194,12 +163,40 @@ describe('start-up', () => {
 })
 
 describe('inbox', () => {
-  it('shows the chats as a list', async () => {
+  it('shows the chats with the first one selected', async () => {
     const { bridge, app } = setup()
 
     await app.start()
 
-    expect(bridge.items).toEqual(['(2) Ana Pop: Vii maine?', 'Familia: ok'])
+    expect(bridge.lines).toEqual(['Inbox 1/2', '> (2) Ana Pop: Vii maine?', '  Familia: ok'])
+  })
+
+  it('moves the selection down and up on scroll, without calling the gateway', async () => {
+    const gateway = fakeGateway()
+    const { bridge, app } = setup(gateway)
+    await app.start()
+
+    bridge.emit(scrollDown)
+    await app.idle()
+    expect(bridge.lines).toEqual(['Inbox 2/2', '  (2) Ana Pop: Vii maine?', '> Familia: ok'])
+
+    bridge.emit(scrollUp)
+    await app.idle()
+    expect(bridge.lines[1]).toBe('> (2) Ana Pop: Vii maine?')
+    expect(gateway.chatCalls).toBe(1)
+  })
+
+  it('stops at the ends of the list', async () => {
+    const { bridge, app } = setup()
+    await app.start()
+
+    bridge.emit(scrollUp)
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+    await app.idle()
+
+    expect(bridge.lines[0]).toBe('Inbox 2/2')
   })
 
   it('shows the reason on the glasses when the gateway call fails', async () => {
@@ -219,7 +216,7 @@ describe('inbox', () => {
     bridge.emit(click)
     await app.idle()
 
-    expect(bridge.items).toEqual(['(2) Ana Pop: Vii maine?'])
+    expect(bridge.lines).toEqual(['Inbox 1/1', '> (2) Ana Pop: Vii maine?'])
   })
 
   it('explains an empty inbox', async () => {
@@ -230,23 +227,24 @@ describe('inbox', () => {
     expect(bridge.text).toContain('No chats yet')
   })
 
-  it('reloads the list when the app returns to the foreground', async () => {
+  it('reloads the list when the app returns to the foreground, keeping the selection', async () => {
     const gateway = fakeGateway()
     const { bridge, app } = setup(gateway)
     await app.start()
+    bridge.emit(scrollDown)
 
     bridge.emit(foregroundEnter)
     await app.idle()
 
     expect(gateway.chatCalls).toBe(2)
-    expect(bridge.page.kind).toBe('list')
+    expect(bridge.lines.at(-1)).toBe('> Familia: ok')
   })
 
   it('asks to exit on double click', async () => {
     const { bridge, app } = setup()
     await app.start()
 
-    bridge.emit(listDoubleClick)
+    bridge.emit(doubleClick)
     await app.idle()
 
     expect(bridge.shutdowns).toEqual([1])
@@ -264,46 +262,23 @@ describe('inbox', () => {
 })
 
 describe('opening a chat', () => {
-  it('opens the chat selected in the list', async () => {
+  it('opens the selected chat on click', async () => {
     const { bridge, gateway } = await openChat(1)
 
     expect(gateway.messageCalls).toEqual(['123@g.us'])
-    expect(bridge.text).toContain('Familia')
+    expect(bridge.lines[0]).toBe('Familia')
     expect(bridge.text).toContain('Buna')
   })
 
-  it('opens the first chat when the event carries no index', async () => {
-    // The host drops zero values, so index 0 arrives as "no index".
-    const context = setup()
-    await context.app.start()
-
-    context.bridge.emit(select(undefined))
-    await context.app.idle()
-
-    expect(context.bridge.text).toContain('Ana Pop')
-  })
-
-  it('falls back to the item name when the index is missing', async () => {
+  it('opens the selected chat on a ring click', async () => {
     const gateway = fakeGateway()
     const { bridge, app } = setup(gateway)
     await app.start()
 
-    bridge.emit(select(undefined, 'Familia: ok'))
+    bridge.emit(ringClick)
     await app.idle()
 
-    expect(gateway.messageCalls).toEqual(['123@g.us'])
-  })
-
-  it('ignores a selection outside the list', async () => {
-    const gateway = fakeGateway()
-    const { bridge, app, logs } = setup(gateway)
-    await app.start()
-
-    bridge.emit(select(7))
-    await app.idle()
-
-    expect(gateway.messageCalls).toEqual([])
-    expect(logs.join('\n')).toContain('no chat at index 7')
+    expect(gateway.messageCalls).toEqual(['ana@s.whatsapp.net'])
   })
 
   it('shows the newest message first', async () => {
@@ -361,7 +336,7 @@ describe('inside a chat', () => {
 
     expect(bridge.shutdowns).toEqual([])
     expect(gateway.chatCalls).toBe(2)
-    expect(bridge.page.kind).toBe('list')
+    expect(bridge.lines[0]).toBe('Inbox 1/2')
   })
 
   it('goes back to the inbox from a failed chat', async () => {
@@ -371,7 +346,26 @@ describe('inside a chat', () => {
     bridge.emit(doubleClick)
     await app.idle()
 
-    expect(bridge.page.kind).toBe('list')
+    expect(bridge.lines[0]).toBe('Inbox 1/2')
+  })
+
+  it('returns to the inbox with the chat it came from still selected', async () => {
+    const { bridge, app } = await openChat(1)
+
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    expect(bridge.lines.at(-1)).toBe('> Familia: ok')
+  })
+
+  it('does not move the inbox selection while a chat is open', async () => {
+    const { bridge, app } = await openChat(0)
+
+    bridge.emit(scrollDown)
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    expect(bridge.lines[1]).toBe('> (2) Ana Pop: Vii maine?')
   })
 })
 
@@ -416,16 +410,6 @@ describe('diagnostics', () => {
     bridge.emit({ jsonData: { eventType: 99, somethingNew: true } })
 
     expect(logs.join('\n')).toContain('unknown event: {"eventType":99,"somethingNew":true}')
-  })
-
-  it('logs a click in the inbox that names no list item', async () => {
-    const { bridge, app, logs } = setup()
-    await app.start()
-
-    bridge.emit(ringClick)
-    await app.idle()
-
-    expect(logs.join('\n')).toContain('click without a list selection')
   })
 
   it('does not log audio frames', async () => {
