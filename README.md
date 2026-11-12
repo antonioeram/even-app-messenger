@@ -12,7 +12,7 @@ Screenshots are from the Even Hub simulator, with made-up data.
 
 - **Unread box.** The home screen lists the chats with unread messages: time, name and the newest message.
 - **Unanswered and All chats.** Two more boxes: read chats that still wait for your reply, and every chat.
-- **Reading.** A chat opens in screen-sized pages, newest message first. Each message shows the time and the sender's name.
+- **Reading.** A chat opens as message bubbles, theirs on the left and yours on the right, each with the sender's name and the time. It opens on the newest page; scroll up for older messages.
 - **Voice reply.** Hold the touchpad and speak. The recording is transcribed on your server and the text appears on the glasses. A click sends it; a double click cancels. Nothing is sent without that click.
 - **Ring or temple.** All gestures work from the R1 ring and from the temple touchpads.
 
@@ -166,7 +166,7 @@ Then set `GATEWAY_STT_URL=http://<server address>:8770/stt` in `deploy/.env`, se
 | A box | Click | Opens the selected chat or box |
 | Unread box | Double click | Asks to exit the app |
 | Other boxes | Double click | Back to the Unread box |
-| A chat | Scroll | Next or previous page |
+| A chat | Scroll | Older (up) or newer (down) page |
 | A chat | Click | Reloads the chat |
 | A chat | Double click | Back to the box |
 | A chat | Hold | Records a reply; release to stop |

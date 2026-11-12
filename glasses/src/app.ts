@@ -1,12 +1,13 @@
 // Stage 1 app: an inbox list of WhatsApp chats and a reading screen.
 //
-// Every screen is text in one container, updated in place.
+// The lists are a title and four bordered boxes whose texts change in place;
+// a chat is a title and message bubbles, theirs left and mine right.
 // Unread:     the home box, chats with unread messages. Scroll moves the
 //             selection, click opens, double click asks to exit. Its last
 //             two rows open the other boxes.
 // Unanswered: read chats waiting for my reply; double click goes home.
 // All chats:  every chat; double click goes home.
-// Chat:       scroll turns pages (older / newer), click reloads, double
+// Chat:       opens on the newest page; scroll turns pages, click reloads, double
 //             click goes back to the box it was opened from. Holding the
 //             touchpad records a reply; releasing it transcribes; the text
 //             is sent only after a click.
@@ -17,16 +18,30 @@ import {
   StartUpPageCreateResult,
   type CreateStartUpPageContainer,
   type EvenHubEvent,
+  type RebuildPageContainer,
   type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
 import { GatewayError, type Chat, type ChatFilter, type GatewayClient, type GatewayErrorKind } from './gateway'
 import { gestureFromEvent, sourceFromEvent } from './gestures'
-import { mainTextUpdate, startupPage } from './screen'
-import { chatPages, inboxText } from './views'
+import {
+  chatPage,
+  headUpdate,
+  inboxPage,
+  INBOX_ROWS,
+  notePage,
+  rowUpdate,
+  startupInbox,
+  type BubbleBox,
+  type Row,
+} from './screen'
+import { chatBubbles, inboxRows, noteRows } from './views'
 
 /** The part of EvenAppBridge the app uses; tests supply a fake. */
 export interface GlassesBridge {
   createStartUpPageContainer(container: CreateStartUpPageContainer): Promise<StartUpPageCreateResult>
+  /** Replaces the whole page; needed when the layout changes. */
+  rebuildPageContainer(container: RebuildPageContainer): Promise<boolean>
+  /** Changes the text of one container in place, without flicker. */
   textContainerUpgrade(container: TextContainerUpgrade): Promise<boolean>
   /** Switches the microphone; audio then arrives as audioEvent frames. */
   audioControl(isOpen: boolean, source?: AudioInputSource): Promise<boolean>
@@ -92,7 +107,7 @@ type Screen =
   /** A message is shown instead of the list: loading or failed. */
   | { name: 'inboxText'; box: Box }
   /** pages is empty while the chat is loading or after a failure. */
-  | { name: 'chat'; box: Box; chat: Chat; pages: string[]; page: number; reply?: Reply }
+  | { name: 'chat'; box: Box; chat: Chat; pages: BubbleBox[][]; page: number; reply?: Reply }
 
 export function createApp(options: AppOptions): App {
   const { bridge, gateway, gatewayUrl, log } = options
@@ -109,9 +124,55 @@ export function createApp(options: AppOptions): App {
     return promise
   }
 
-  async function show(text: string): Promise<void> {
-    const ok = await bridge.textContainerUpgrade(mainTextUpdate(text))
+  const BLANK: Row = { text: '', selected: false }
+  /** What the inbox layout shows now; null while another layout is on the glasses. */
+  let inboxShown: { title: string; rows: Row[] } | null = null
+  /** Draw calls run one after another, so each sees what the previous one left on the glasses. */
+  let drawing: Promise<void> = Promise.resolve()
+
+  function draw(work: () => Promise<void>): Promise<void> {
+    drawing = drawing.then(work, work)
+    return drawing
+  }
+
+  async function upgrade(update: TextContainerUpgrade): Promise<void> {
+    const ok = await bridge.textContainerUpgrade(update)
     if (!ok) log('textContainerUpgrade failed')
+  }
+
+  /** Shows a title and rows in the inbox layout, changing only the boxes that differ. */
+  function showInbox(title: string, rows: readonly Row[]): Promise<void> {
+    return draw(async () => {
+      const next = Array.from({ length: INBOX_ROWS }, (_, index) => rows[index] ?? BLANK)
+      if (!inboxShown) {
+        const ok = await bridge.rebuildPageContainer(inboxPage(title, next))
+        if (!ok) log('rebuildPageContainer failed')
+      } else {
+        if (inboxShown.title !== title) await upgrade(headUpdate(title))
+        for (const [index, row] of next.entries()) {
+          const shown = inboxShown.rows[index]
+          if (shown?.text !== row.text || shown.selected !== row.selected) await upgrade(rowUpdate(index, row))
+        }
+      }
+      inboxShown = { title, rows: next }
+    })
+  }
+
+  /** Shows a page with its own layout (a chat or a note). */
+  function showPage(page: RebuildPageContainer): Promise<void> {
+    return draw(async () => {
+      inboxShown = null
+      const ok = await bridge.rebuildPageContainer(page)
+      if (!ok) log('rebuildPageContainer failed')
+    })
+  }
+
+  /** Draws the current page of the open chat. */
+  function showChat(): Promise<void> {
+    if (screen.name !== 'chat') return Promise.resolve()
+    const { chat, pages, page } = screen
+    if (pages.length === 0) return showPage(notePage(chat.name, 'No messages'))
+    return showPage(chatPage(`${chat.name} ${page + 1}/${pages.length}`, pages[page] ?? []))
   }
 
   /** Runs one gateway round trip at a time; a gesture during one is dropped. */
@@ -127,11 +188,15 @@ export function createApp(options: AppOptions): App {
   async function showFailure(error: unknown, hint: string): Promise<void> {
     const { label, detail } = describeError(error)
     log(`gateway error: ${label}: ${detail}`)
-    await show(`Gateway unreachable\n${gatewayUrl}\n${label}: ${detail}\n\n${hint}`)
+    if (screen.name === 'chat') {
+      await showPage(notePage('Gateway unreachable', `${gatewayUrl}\n${label}: ${detail}\n\n${hint}`))
+    } else {
+      await showInbox('Messenger', noteRows(`Gateway unreachable\n${gatewayUrl}\n${label}: ${detail}\n${hint}`))
+    }
   }
 
   function drawInbox(box: Box, chats: Chat[], cursor: number): Promise<void> {
-    return show(inboxText(BOX_TITLE[box], chats, cursor, box === HOME ? HOME_ROWS : []))
+    return showInbox(`${BOX_TITLE[box]} (${chats.length})`, inboxRows(chats, cursor, box === HOME ? HOME_ROWS : []))
   }
 
   function openInbox(box: Box): Promise<void> {
@@ -158,9 +223,10 @@ export function createApp(options: AppOptions): App {
       screen = { name: 'chat', box, chat, pages: [], page: 0 }
       try {
         const conversation = await gateway.messages(chat.id)
-        const pages = chatPages(conversation.chat, conversation.messages)
-        screen = { name: 'chat', box, chat: conversation.chat, pages, page: 0 }
-        await show(pages[0] ?? '')
+        const pages = chatBubbles(conversation.chat, conversation.messages)
+        // The last page holds the newest messages.
+        screen = { name: 'chat', box, chat: conversation.chat, pages, page: Math.max(0, pages.length - 1) }
+        await showChat()
         log(`chat: ${conversation.messages.length} messages, ${pages.length} pages`)
         if (conversation.chat.unread > 0) {
           // Read on the glasses: it leaves the Unread box. WhatsApp is not told.
@@ -185,7 +251,7 @@ export function createApp(options: AppOptions): App {
       const page = Math.max(0, Math.min(screen.pages.length - 1, screen.page + step))
       if (page === screen.page) return
       screen = { ...screen, page }
-      void track(show(screen.pages[page] ?? ''))
+      void track(showChat())
     }
   }
 
@@ -218,13 +284,13 @@ export function createApp(options: AppOptions): App {
     if (screen.name !== 'chat') return Promise.resolve()
     const { reply: _dropped, ...chat } = screen
     screen = chat
-    return track(show(screen.pages[screen.page] ?? ''))
+    return track(showChat())
   }
 
-  function notice(text: string): Promise<void> {
+  function notice(title: string, detail = ''): Promise<void> {
     if (screen.name !== 'chat') return Promise.resolve()
     screen = { ...screen, reply: { phase: 'notice' } }
-    return show(`${text}\n\nHold = record again | Click = back`)
+    return showPage(notePage(title, `${detail ? `${detail}\n\n` : ''}Hold = record again | Click = back`))
   }
 
   function startRecording(): void {
@@ -236,7 +302,8 @@ export function createApp(options: AppOptions): App {
       (async () => {
         const ok = await bridge.audioControl(true, AudioInputSource.Glasses)
         if (!ok) log('audioControl(on) failed')
-        await show(`Recording for ${screen.name === 'chat' ? screen.chat.name : ''}...\n\nRelease = stop | Double click = cancel`)
+        const name = screen.name === 'chat' ? screen.chat.name : ''
+        await showPage(notePage(`Recording for ${name}`, 'Speak now\n\nRelease = stop | Double click = cancel'))
       })(),
     )
   }
@@ -266,7 +333,7 @@ export function createApp(options: AppOptions): App {
         await notice('Nothing recorded')
         return
       }
-      await show('Transcribing...')
+      await showPage(notePage(`Reply to ${chatName}`, 'Transcribing...'))
       try {
         const transcript = await gateway.transcribe(pcm)
         if (!transcript.text.trim()) {
@@ -276,11 +343,11 @@ export function createApp(options: AppOptions): App {
         log(`transcribed (${transcript.lang})`)
         if (screen.name !== 'chat') return
         screen = { ...screen, reply: { phase: 'confirm', text: transcript.text, display: transcript.display } }
-        await show(`Reply to ${chatName}:\n${transcript.display}\n\n${CONFIRM_HINT}`)
+        await showPage(notePage(`Reply to ${chatName}`, `${transcript.display}\n\n${CONFIRM_HINT}`))
       } catch (error) {
         const { label, detail } = describeError(error)
         log(`transcription error: ${label}: ${detail}`)
-        await notice(`Transcription failed\n${label}: ${detail}`)
+        await notice('Transcription failed', `${label}: ${detail}`)
       }
     })
   }
@@ -296,14 +363,16 @@ export function createApp(options: AppOptions): App {
     if (screen.name !== 'chat' || loading) return Promise.resolve()
     const { box, chat } = screen
     return load(async () => {
-      await show(`Sending to ${chat.name}...\n${reply.display}`)
+      await showPage(notePage(`Sending to ${chat.name}`, reply.display))
       try {
         await gateway.send(chat.id, reply.text)
         log('reply sent')
       } catch (error) {
         const { label, detail } = describeError(error)
         log(`send error: ${label}: ${detail}`)
-        await show(`Not sent\n${label}: ${detail}\n\n${reply.display}\n\nClick = try again | Double click = cancel`)
+        await showPage(
+          notePage('Not sent', `${label}: ${detail}\n\n${reply.display}\n\nClick = try again | Double click = cancel`),
+        )
         return
       }
       // Reload, so the sent message shows up.
@@ -370,11 +439,13 @@ export function createApp(options: AppOptions): App {
 
   return {
     async start() {
-      const result = await bridge.createStartUpPageContainer(startupPage(`Messenger\nLoading chats...\n${gatewayUrl}`))
+      const rows = noteRows(`Loading chats...\n${gatewayUrl}`)
+      const result = await bridge.createStartUpPageContainer(startupInbox('Messenger', rows))
       if (result !== StartUpPageCreateResult.success) {
         log(`createStartUpPageContainer failed: ${StartUpPageCreateResult[result] ?? result}`)
         return
       }
+      inboxShown = { title: 'Messenger', rows: Array.from({ length: INBOX_ROWS }, (_, index) => rows[index] ?? BLANK) }
       bridge.onEvenHubEvent(onEvent)
       await openInbox(HOME)
     },

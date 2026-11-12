@@ -1,46 +1,168 @@
-// Layout constants and page builders for the 576x288 glasses canvas.
+// Page builders for the 576x288 glasses canvas.
+//
+// Two layouts. The inbox is a header and four bordered boxes; it is created
+// at start-up and then only its texts change (textContainerUpgrade, which is
+// flicker-free and proven on real glasses). A chat is a header and message
+// bubbles, left for theirs and right for mine; its geometry depends on the
+// messages, so each page is a rebuild.
 
-import { CreateStartUpPageContainer, TextContainerProperty, TextContainerUpgrade } from '@evenrealities/even_hub_sdk'
+import {
+  CreateStartUpPageContainer,
+  RebuildPageContainer,
+  TextContainerProperty,
+  TextContainerUpgrade,
+} from '@evenrealities/even_hub_sdk'
 
 export const SCREEN = { width: 576, height: 288 } as const
 
-/** The single full-screen text container. Every screen is drawn in it, and it captures input. */
-export const MAIN_CONTAINER = { id: 1, name: 'main' } as const
-
-// Limits from the Even Hub display docs.
+/** Limit of the page calls, from the Even Hub display docs. */
 export const MAX_CREATE_CHARS = 1000
-export const MAX_UPGRADE_CHARS = 2000
+
+/** Title strip at the top of every page. It captures input: its text always fits, so every swipe arrives as an event. */
+export const HEAD = { id: 1, name: 'head' } as const
+const HEAD_HEIGHT = 30
+
+/** Boxes on the inbox page. */
+export const INBOX_ROWS = 4
+const ROW_HEIGHT = 62
+const ROW_PITCH = 64
+
+export const BUBBLE_WIDTH = 440
+const LINE_HEIGHT = 27
+const BUBBLE_PADDING = 12
+const BUBBLE_GAP = 4
+
+// Text brightness levels (0 to 4).
+const BRIGHT = 4
+const DIM = 2
+// Border grey level (0 to 15).
+const BORDER = 9
+
+/** One inbox box: its text and whether it is the selected one. */
+export interface Row {
+  text: string
+  selected: boolean
+}
+
+/** One message bubble. lines is the number of text lines, which sets its height. */
+export interface BubbleBox {
+  mine: boolean
+  text: string
+  lines: number
+}
 
 /** Cuts text to the limit. Uses ASCII dots: the firmware font drops unknown glyphs. */
 export function fitText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
-  return text.slice(0, maxChars - 3) + '...'
+  return text.slice(0, Math.max(0, maxChars - 3)) + '...'
 }
 
-function mainText(content: string): TextContainerProperty {
+/** A container must have content; a space keeps an unused box valid. */
+function content(text: string): string {
+  return text === '' ? ' ' : fitText(text, MAX_CREATE_CHARS)
+}
+
+function head(title: string): TextContainerProperty {
   return new TextContainerProperty({
     xPosition: 0,
     yPosition: 0,
     width: SCREEN.width,
-    height: SCREEN.height,
+    height: HEAD_HEIGHT,
     borderWidth: 0,
-    paddingLength: 4,
-    containerID: MAIN_CONTAINER.id,
-    containerName: MAIN_CONTAINER.name,
-    content: fitText(content, MAX_CREATE_CHARS),
+    // No padding: with any, one line of text overflows the strip, the firmware
+    // scrolls it internally and swallows swipes instead of reporting them.
+    paddingLength: 0,
+    containerID: HEAD.id,
+    containerName: HEAD.name,
+    content: content(title),
     isEventCapture: 1,
+    textColor: BRIGHT,
   })
 }
 
-export function startupPage(content: string): CreateStartUpPageContainer {
-  return new CreateStartUpPageContainer({ containerTotalNum: 1, textObject: [mainText(content)] })
+function box(
+  index: number,
+  name: string,
+  frame: { x: number; y: number; width: number; height: number },
+  text: string,
+  bright: boolean,
+  padding = 4,
+): TextContainerProperty {
+  return new TextContainerProperty({
+    xPosition: frame.x,
+    yPosition: frame.y,
+    width: frame.width,
+    height: frame.height,
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 6,
+    paddingLength: padding,
+    containerID: HEAD.id + 1 + index,
+    containerName: name,
+    content: content(text),
+    isEventCapture: 0,
+    textColor: bright ? BRIGHT : DIM,
+  })
 }
 
-/** Replaces the text on the glasses. Proven on real hardware, unlike a page rebuild with a list. */
-export function mainTextUpdate(content: string): TextContainerUpgrade {
+const rowName = (index: number) => `row${index + 1}`
+
+function inboxBoxes(title: string, rows: readonly Row[]): TextContainerProperty[] {
+  const boxes = [head(title)]
+  for (let index = 0; index < INBOX_ROWS; index += 1) {
+    const row = rows[index] ?? { text: '', selected: false }
+    const frame = { x: 0, y: HEAD_HEIGHT + index * ROW_PITCH, width: SCREEN.width, height: ROW_HEIGHT }
+    // Two lines of text need all the height a row has, so the padding is small.
+    boxes.push(box(index, rowName(index), frame, row.text, row.selected, 2))
+  }
+  return boxes
+}
+
+/** The inbox layout as the start-up page. */
+export function startupInbox(title: string, rows: readonly Row[]): CreateStartUpPageContainer {
+  const textObject = inboxBoxes(title, rows)
+  return new CreateStartUpPageContainer({ containerTotalNum: textObject.length, textObject })
+}
+
+/** The inbox layout, for coming back from a chat. */
+export function inboxPage(title: string, rows: readonly Row[]): RebuildPageContainer {
+  const textObject = inboxBoxes(title, rows)
+  return new RebuildPageContainer({ containerTotalNum: textObject.length, textObject })
+}
+
+/** Changes one inbox box in place. */
+export function rowUpdate(index: number, row: Row): TextContainerUpgrade {
   return new TextContainerUpgrade({
-    containerID: MAIN_CONTAINER.id,
-    containerName: MAIN_CONTAINER.name,
-    content: fitText(content, MAX_UPGRADE_CHARS),
+    containerID: HEAD.id + 1 + index,
+    containerName: rowName(index),
+    content: content(row.text),
+    textColor: row.selected ? BRIGHT : DIM,
   })
+}
+
+/** Changes the title in place. */
+export function headUpdate(title: string): TextContainerUpgrade {
+  return new TextContainerUpgrade({ containerID: HEAD.id, containerName: HEAD.name, content: content(title) })
+}
+
+/** A chat page: title, then bubbles from top to bottom, theirs on the left and mine on the right. */
+export function chatPage(title: string, bubbles: readonly BubbleBox[]): RebuildPageContainer {
+  const textObject = [head(title)]
+  let y = HEAD_HEIGHT
+  bubbles.forEach((bubble, index) => {
+    // Never draw past the screen, even if a caller exceeds the line budget.
+    const height = Math.min(bubble.lines * LINE_HEIGHT + BUBBLE_PADDING, SCREEN.height - y)
+    if (height <= BUBBLE_PADDING) return
+    const frame = { x: bubble.mine ? SCREEN.width - BUBBLE_WIDTH : 0, y, width: BUBBLE_WIDTH, height }
+    textObject.push(box(index, `msg${index + 1}`, frame, bubble.text, true))
+    y += height + BUBBLE_GAP
+  })
+  return new RebuildPageContainer({ containerTotalNum: textObject.length, textObject })
+}
+
+/** A title and one large box: recording, transcript to confirm, errors inside a chat. */
+export function notePage(title: string, text: string): RebuildPageContainer {
+  const frame = { x: 0, y: HEAD_HEIGHT, width: SCREEN.width, height: SCREEN.height - HEAD_HEIGHT }
+  const textObject = [head(title), box(0, 'note', frame, text, true)]
+  return new RebuildPageContainer({ containerTotalNum: textObject.length, textObject })
 }

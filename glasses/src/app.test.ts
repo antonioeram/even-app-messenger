@@ -10,35 +10,70 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { createApp, type GlassesBridge } from './app'
 import { GatewayError, type Chat, type Conversation, type GatewayClient, type Message, type Transcript } from './gateway'
-import { MAIN_CONTAINER, MAX_UPGRADE_CHARS } from './screen'
 
+type BoxInput = {
+  xPosition?: number
+  yPosition?: number
+  width?: number
+  height?: number
+  containerID?: number
+  containerName?: string
+  content?: string
+  isEventCapture?: number
+  textColor?: number
+}
+type PageInput = { containerTotalNum?: number; textObject?: BoxInput[] }
+
+/** Models the glasses: a page of text containers that can be replaced or updated in place. */
 class FakeBridge implements GlassesBridge {
-  created: string[] = []
-  upgrades: string[] = []
+  private boxes: BoxInput[] = []
+  /** Text of the start-up page. */
+  startText = ''
+  /** Pages drawn with a full rebuild. */
+  rebuilds = 0
+  /** In-place text updates. */
+  upgrades = 0
   shutdowns: number[] = []
   /** Microphone switch history: true = on. */
   mic: boolean[] = []
   createResult = StartUpPageCreateResult.success
   private listener: ((event: EvenHubEvent) => void) | null = null
 
-  async createStartUpPageContainer(container: {
-    containerTotalNum?: number
-    textObject?: { content?: string; isEventCapture?: number; containerID?: number; containerName?: string }[]
-  }) {
-    const text = container.textObject?.[0]
-    expect(container.containerTotalNum).toBe(1)
-    expect(text?.isEventCapture).toBe(1)
-    expect(text?.containerID).toBe(MAIN_CONTAINER.id)
-    expect(text?.containerName).toBe(MAIN_CONTAINER.name)
-    this.created.push(text?.content ?? '')
+  private setPage(page: PageInput) {
+    const boxes = page.textObject ?? []
+    // What the Even app validates before a page reaches the glasses.
+    expect(page.containerTotalNum).toBe(boxes.length)
+    expect(boxes.filter((box) => box.isEventCapture === 1)).toHaveLength(1)
+    expect(new Set(boxes.map((box) => box.containerID)).size).toBe(boxes.length)
+    for (const box of boxes) {
+      expect((box.content ?? '').length).toBeGreaterThan(0)
+      expect((box.xPosition ?? 0) + (box.width ?? 0)).toBeLessThanOrEqual(576)
+      expect((box.yPosition ?? 0) + (box.height ?? 0)).toBeLessThanOrEqual(288)
+    }
+    this.boxes = boxes.map((box) => ({ ...box }))
+  }
+
+  async createStartUpPageContainer(page: PageInput) {
+    this.setPage(page)
+    this.startText = this.text
     return this.createResult
   }
 
-  async textContainerUpgrade(upgrade: { containerID?: number; containerName?: string; content?: string }) {
-    expect(upgrade.containerID).toBe(MAIN_CONTAINER.id)
-    expect(upgrade.containerName).toBe(MAIN_CONTAINER.name)
-    expect((upgrade.content ?? '').length).toBeLessThanOrEqual(MAX_UPGRADE_CHARS)
-    this.upgrades.push(upgrade.content ?? '')
+  async rebuildPageContainer(page: PageInput) {
+    this.setPage(page)
+    this.rebuilds += 1
+    return true
+  }
+
+  async textContainerUpgrade(upgrade: { containerID?: number; containerName?: string; content?: string; textColor?: number }) {
+    const box = this.boxes.find((candidate) => candidate.containerID === upgrade.containerID)
+    // An update for a container that is not on the page is lost on real glasses.
+    if (!box) throw new Error(`no container ${upgrade.containerID} on the current page`)
+    expect(upgrade.containerName).toBe(box.containerName)
+    expect((upgrade.content ?? '').length).toBeGreaterThan(0)
+    box.content = upgrade.content
+    if (upgrade.textColor !== undefined) box.textColor = upgrade.textColor
+    this.upgrades += 1
     return true
   }
 
@@ -63,13 +98,24 @@ class FakeBridge implements GlassesBridge {
     this.listener?.(event)
   }
 
-  /** What the glasses show now. */
+  /** Everything the glasses show now, top to bottom. */
   get text(): string {
-    return this.upgrades.at(-1) ?? this.created.at(-1) ?? ''
+    return this.boxes.map((box) => box.content ?? '').join('\n')
   }
 
+  /** The non-blank lines on the glasses. */
   get lines(): string[] {
-    return this.text.split('\n')
+    return this.text.split('\n').filter((line) => line.trim() !== '')
+  }
+
+  /** Brightness of each box below the title. */
+  get brightness(): (number | undefined)[] {
+    return this.boxes.slice(1).map((box) => box.textColor)
+  }
+
+  /** Horizontal position of each box below the title. */
+  get lefts(): (number | undefined)[] {
+    return this.boxes.slice(1).map((box) => box.xPosition)
   }
 }
 
@@ -188,9 +234,8 @@ describe('start-up', () => {
 
     await app.start()
 
-    expect(bridge.created).toHaveLength(1)
-    expect(bridge.created[0]).toContain('Loading')
-    expect(bridge.created[0]).toContain('gw.example')
+    expect(bridge.startText).toContain('Loading')
+    expect(bridge.startText).toContain('gw.example')
   })
 
   it('stops with a log line when the start-up page cannot be created', async () => {
@@ -211,7 +256,8 @@ describe('inbox', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unread (2)', '> 09:36 (2) Ana Pop: Vii maine?', '  11.11 Familia: ok', '  [Unanswered]', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (2)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Familia  11.11', 'ok', '  [Unanswered]', '  [All chats]'])
+    expect(bridge.brightness).toEqual([4, 2, 2, 2])
   })
 
   it('moves the selection down and up on scroll, without calling the gateway', async () => {
@@ -221,12 +267,15 @@ describe('inbox', () => {
 
     bridge.emit(scrollDown)
     await app.idle()
-    expect(bridge.lines).toEqual(['Unread (2)', '  09:36 (2) Ana Pop: Vii maine?', '> 11.11 Familia: ok', '  [Unanswered]', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (2)', '* Ana Pop  09:36', 'Vii maine? (2)', '> Familia  11.11', 'ok', '  [Unanswered]', '  [All chats]'])
+    expect(bridge.brightness).toEqual([2, 4, 2, 2])
 
     bridge.emit(scrollUp)
     await app.idle()
-    expect(bridge.lines[1]).toBe('> 09:36 (2) Ana Pop: Vii maine?')
+    expect(bridge.lines[1]).toBe('> Ana Pop  09:36')
     expect(gateway.chatCalls).toBe(1)
+    // Moving the selection never redraws the whole page.
+    expect(bridge.rebuilds).toBe(0)
   })
 
   it('stops at the ends of the list', async () => {
@@ -260,7 +309,7 @@ describe('inbox', () => {
     bridge.emit(click)
     await app.idle()
 
-    expect(bridge.lines).toEqual(['Unread (1)', '> 09:36 (2) Ana Pop: Vii maine?', '  [Unanswered]', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (1)', '> Ana Pop  09:36', 'Vii maine? (2)', '  [Unanswered]', '  [All chats]'])
   })
 
   it('asks the gateway for unread chats first', async () => {
@@ -292,7 +341,7 @@ describe('inbox', () => {
     await app.idle()
 
     expect(gateway.filters).toEqual(['unread', undefined])
-    expect(bridge.lines).toEqual(['All chats (2)', '> 09:36 (2) Ana Pop: Vii maine?', '  11.11 Familia: ok'])
+    expect(bridge.lines).toEqual(['All chats (2)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Familia  11.11', 'ok'])
   })
 
   it('goes back from all chats to the unread box on double click, without asking to exit', async () => {
@@ -323,7 +372,7 @@ describe('inbox', () => {
     await app.idle()
 
     expect(gateway.chatCalls).toBe(2)
-    expect(bridge.lines[2]).toBe('> 11.11 Familia: ok')
+    expect(bridge.lines).toContain('> Familia  11.11')
   })
 
   it('asks to exit on double click', async () => {
@@ -367,11 +416,21 @@ describe('opening a chat', () => {
     expect(gateway.messageCalls).toEqual(['ana@s.whatsapp.net'])
   })
 
-  it('shows the newest message first', async () => {
-    const gateway = fakeGateway({ messages: [[message('older', { clock: '09:30' }), message('newer', { clock: '09:40' })]] })
+  it('shows messages as bubbles in time order: theirs on the left, mine on the right', async () => {
+    const gateway = fakeGateway({
+      messages: [[message('older', { clock: '09:30' }), message('newer', { clock: '09:40', fromMe: true, sender: 'Me' })]],
+    })
     const { bridge } = await openChat(0, gateway)
 
-    expect(bridge.text.indexOf('newer')).toBeLessThan(bridge.text.indexOf('older'))
+    expect(bridge.lines).toEqual(['Ana Pop 1/1', 'Ana Pop - 09:30', 'older', 'Me - 09:40', 'newer'])
+    expect(bridge.lefts[0]).toBe(0)
+    expect(bridge.lefts[1]).toBeGreaterThan(0)
+  })
+
+  it('says so when the chat has no messages', async () => {
+    const { bridge } = await openChat(0, fakeGateway({ messages: [[]] }))
+
+    expect(bridge.text).toContain('No messages')
   })
 
   it('shows the reason when the messages cannot be loaded', async () => {
@@ -441,7 +500,7 @@ describe('inside a chat', () => {
     bridge.emit(doubleClick)
     await app.idle()
 
-    expect(bridge.lines[2]).toBe('> 11.11 Familia: ok')
+    expect(bridge.lines).toContain('> Familia  11.11')
   })
 
   it('does not move the inbox selection while a chat is open', async () => {
@@ -451,29 +510,29 @@ describe('inside a chat', () => {
     bridge.emit(doubleClick)
     await app.idle()
 
-    expect(bridge.lines[1]).toBe('> 09:36 (2) Ana Pop: Vii maine?')
+    expect(bridge.lines[1]).toBe('> Ana Pop  09:36')
   })
 
-  it('pages through older messages on scroll, without calling the gateway', async () => {
+  it('pages back to older messages on scroll up, without calling the gateway', async () => {
     const many = Array.from({ length: 20 }, (_, i) => message(`message number ${i}`))
     const gateway = fakeGateway({ messages: [many] })
     const { bridge, app } = await openChat(0, gateway)
-    expect(bridge.lines[0]).toBe('Ana Pop 1/3')
+    // Opens on the last page, which holds the newest messages.
+    expect(bridge.lines[0]).toBe('Ana Pop 7/7')
     expect(bridge.text).toContain('message number 19')
-
-    bridge.emit(scrollDown)
-    await app.idle()
-    expect(bridge.lines[0]).toBe('Ana Pop 2/3')
-
-    bridge.emit(scrollDown)
-    bridge.emit(scrollDown)
-    await app.idle()
-    expect(bridge.lines[0]).toBe('Ana Pop 3/3')
-    expect(bridge.text).toContain('message number 0')
 
     bridge.emit(scrollUp)
     await app.idle()
-    expect(bridge.lines[0]).toBe('Ana Pop 2/3')
+    expect(bridge.lines[0]).toBe('Ana Pop 6/7')
+
+    for (let i = 0; i < 9; i += 1) bridge.emit(scrollUp)
+    await app.idle()
+    expect(bridge.lines[0]).toBe('Ana Pop 1/7')
+    expect(bridge.text).toContain('message number 0')
+
+    bridge.emit(scrollDown)
+    await app.idle()
+    expect(bridge.lines[0]).toBe('Ana Pop 2/7')
     expect(gateway.messageCalls).toHaveLength(1)
   })
 
