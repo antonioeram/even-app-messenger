@@ -1,0 +1,19 @@
+# Optional override for hosts where Nginx Proxy Manager runs in Docker.
+#
+# It attaches the gateway to the proxy's Docker network, so the proxy host can
+# forward to http://even-messenger-gateway:8080 and no LAN port is needed.
+# Enable it with this line in deploy/.env:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.npm.yml
+
+services:
+  gateway:
+    networks:
+      default:
+      npm:
+        aliases:
+          - even-messenger-gateway
+
+networks:
+  npm:
+    external: true
+    name: ${NPM_NETWORK:-nginx-proxy-manager_default}

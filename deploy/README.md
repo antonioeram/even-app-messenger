@@ -85,6 +85,19 @@ curl -s https://gateway.example.com/hello -H "Authorization: Bearer $GATEWAY_TOK
 
 Răspunsuri așteptate: `200` cu `Access-Control-Allow-Origin: *`; `204` cu `Access-Control-Allow-Headers: Authorization, Content-Type`; un JSON cu câmpul `text`.
 
+## Varianta cu Nginx Proxy Manager în Docker
+
+Când NPM rulează în Docker pe aceeași mașină, gateway-ul se atașează la rețeaua lui și nu mai are nevoie de un port în LAN. În `deploy/.env`:
+
+```
+COMPOSE_FILE=docker-compose.yml:docker-compose.npm.yml
+GATEWAY_PUBLISH=127.0.0.1:8791
+```
+
+În NPM, proxy host-ul trimite către `http://even-messenger-gateway:8080`.
+
+Dacă subdomeniul este public (înregistrare Cloudflare către adresa de acasă) și certificatul se cere prin validare HTTP, accesul din exterior trebuie refuzat în nginx pentru tot, mai puțin calea `/.well-known/acme-challenge/`. Telefonul ajunge la gateway printr-o rescriere DNS internă a subdomeniului către adresa mașinii cu NPM, deci traficul nu trece prin Cloudflare.
+
 ## Configurare
 
 | Variabilă | Implicit | Rol |
