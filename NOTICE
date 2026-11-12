@@ -1,0 +1,14 @@
+Even Messenger
+Copyright 2026 Antonio Eram
+
+This product is licensed under the Apache License, Version 2.0.
+
+It depends on third-party software that keeps its own license, including:
+
+- whatsmeow (https://github.com/tulir/whatsmeow), Mozilla Public License 2.0
+- modernc.org/sqlite, BSD 3-Clause
+- github.com/skip2/go-qrcode, MIT
+- @evenrealities/even_hub_sdk, MIT
+
+This project is not affiliated with, endorsed by or supported by
+Even Realities, WhatsApp or Meta.

@@ -35,7 +35,7 @@ type Result struct {
 // "audio" file and a "lang" query parameter ("auto" detects the language)
 // and answers {"text": ..., "lang": ...}.
 type Client struct {
-	// URL is the endpoint, e.g. http://10.0.10.42:8770/stt.
+	// URL is the endpoint, e.g. http://192.168.1.50:8770/stt.
 	URL string
 	// Languages the speaker uses. When detection picks another one, the
 	// clip is transcribed again in the first language. Empty accepts any.
