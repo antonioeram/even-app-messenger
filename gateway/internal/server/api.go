@@ -22,6 +22,7 @@ import (
 type ChatStore interface {
 	Chats(ctx context.Context, limit int, filter store.Filter) ([]store.Chat, error)
 	SetUnread(ctx context.Context, chatID string, unread int) error
+	Counts(ctx context.Context) (store.Counts, error)
 	Chat(ctx context.Context, id string) (store.Chat, bool, error)
 	Messages(ctx context.Context, chatID string, limit int, before time.Time) ([]store.Message, error)
 }
@@ -115,6 +116,20 @@ func (a *api) chats(w http.ResponseWriter, r *http.Request) {
 		out = append(out, a.chatJSON(c))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"chats": out})
+}
+
+// counts reports how many chats each box holds, for the labels on the glasses.
+func (a *api) counts(w http.ResponseWriter, r *http.Request) {
+	if a.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "message store is not configured")
+		return
+	}
+	c, err := a.store.Counts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not count chats")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"unread": c.Unread, "unanswered": c.Unanswered, "all": c.All})
 }
 
 func (a *api) messages(w http.ResponseWriter, r *http.Request) {

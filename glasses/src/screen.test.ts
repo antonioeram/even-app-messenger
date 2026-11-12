@@ -120,10 +120,11 @@ describe('inbox page', () => {
     expect(boxes[1]?.textColor).toBeGreaterThan(boxes[0]?.textColor ?? 99)
   })
 
-  it('keeps unused rows as valid, blank boxes', () => {
-    const boxes = expectValidPage(inboxPage('Unread (1)', rows(1)))
-    expect(boxes).toHaveLength(1 + INBOX_ROWS)
-    expect(boxes.at(-1)?.content).toBe(' ')
+  it('draws one box and one avatar slot per row, and none for rows that do not exist', () => {
+    const page = inboxPage('Unread (1)', rows(1))
+    expect(expectValidPage(page)).toHaveLength(2)
+    expect(page.imageObject ?? []).toHaveLength(1)
+    expect(expectValidPage(inboxPage('Unread (0)', []))).toHaveLength(1)
   })
 
   it('builds the same layout for start-up, so the inbox needs no rebuild', () => {

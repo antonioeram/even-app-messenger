@@ -23,7 +23,14 @@ import {
   type RebuildPageContainer,
   type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
-import { GatewayError, type Chat, type ChatFilter, type GatewayClient, type GatewayErrorKind } from './gateway'
+import {
+  GatewayError,
+  type Chat,
+  type ChatFilter,
+  type Counts,
+  type GatewayClient,
+  type GatewayErrorKind,
+} from './gateway'
 import { gestureFromEvent, sourceFromEvent } from './gestures'
 import {
   avatarSlot,
@@ -95,7 +102,12 @@ const BOX_TITLE: Record<Box, string> = { unread: 'Unread', unanswered: 'Unanswer
 const BOX_FILTER: Record<Box, ChatFilter | undefined> = { unread: 'unread', unanswered: 'unanswered', all: undefined }
 /** Rows after the chats of the home box; selecting one opens that box. */
 const HOME_LINKS: readonly Box[] = ['unanswered', 'all']
-const HOME_ROWS = HOME_LINKS.map((box) => `[${BOX_TITLE[box]}]`)
+const BOX_COUNT: Record<Box, keyof Counts> = { unread: 'unread', unanswered: 'unanswered', all: 'all' }
+
+/** The link rows of the home box, with the size of each box when it is known. */
+function homeLinks(counts: Counts | null): string[] {
+  return HOME_LINKS.map((box) => (counts ? `${BOX_TITLE[box]} (${counts[BOX_COUNT[box]]})` : BOX_TITLE[box]))
+}
 
 // 16 kHz, 16 bit, mono.
 const BYTES_PER_SECOND = 32_000
@@ -114,7 +126,7 @@ type Reply =
 
 type Screen =
   /** A chat list is shown; cursor is the selected row (chats.length and up = the home links). */
-  | { name: 'inbox'; box: Box; chats: Chat[]; cursor: number }
+  | { name: 'inbox'; box: Box; chats: Chat[]; cursor: number; links: string[] }
   /** A message is shown instead of the list: loading or failed. */
   | { name: 'inboxText'; box: Box }
   /** pages is empty while the chat is loading or after a failure. */
@@ -135,7 +147,6 @@ export function createApp(options: AppOptions): App {
     return promise
   }
 
-  const BLANK: Row = { text: '', selected: false, avatar: '' }
   /** False without a renderer, and after the glasses refused a page with image containers. */
   let avatarsOn = Boolean(renderAvatar)
   /** The initials each avatar slot shows on the current inbox page. */
@@ -175,8 +186,9 @@ export function createApp(options: AppOptions): App {
   /** Shows a title and rows in the inbox layout, changing only the boxes that differ. */
   function showInbox(title: string, rows: readonly Row[]): Promise<void> {
     return draw(async () => {
-      const next = Array.from({ length: INBOX_ROWS }, (_, index) => rows[index] ?? BLANK)
-      if (!inboxShown) {
+      const next = rows.slice(0, INBOX_ROWS)
+      // The page has one box per row, so a different number of rows needs a new page.
+      if (!inboxShown || inboxShown.rows.length !== next.length) {
         let ok = await bridge.rebuildPageContainer(inboxPage(title, next, avatarsOn))
         if (!ok && avatarsOn) {
           avatarsOn = false
@@ -234,17 +246,24 @@ export function createApp(options: AppOptions): App {
     }
   }
 
-  function drawInbox(box: Box, chats: Chat[], cursor: number): Promise<void> {
-    return showInbox(`${BOX_TITLE[box]} (${chats.length})`, inboxRows(chats, cursor, box === HOME ? HOME_ROWS : []))
+  function drawInbox(box: Box, chats: Chat[], cursor: number, links: readonly string[]): Promise<void> {
+    const rows = inboxRows(chats, cursor, links)
+    return showInbox(`${BOX_TITLE[box]} (${chats.length})`, rows.length > 0 ? rows : noteRows('No chats here\nDouble click = back'))
   }
 
   function openInbox(box: Box): Promise<void> {
     return load(async () => {
       try {
-        const chats = await gateway.chats(BOX_FILTER[box])
+        // The home box also shows how many chats the other boxes hold; a
+        // gateway without that answer leaves the numbers out.
+        const [chats, counts] = await Promise.all([
+          gateway.chats(BOX_FILTER[box]),
+          box === HOME ? gateway.counts().catch(() => null) : null,
+        ])
+        const links = box === HOME ? homeLinks(counts) : []
         const cursor = Math.max(0, chats.findIndex((chat) => chat.id === selectedId))
-        screen = { name: 'inbox', box, chats, cursor }
-        await drawInbox(box, chats, cursor)
+        screen = { name: 'inbox', box, chats, cursor, links }
+        await drawInbox(box, chats, cursor, links)
         log(`${box}: ${chats.length} chats`)
       } catch (error) {
         screen = { name: 'inboxText', box }
@@ -280,12 +299,12 @@ export function createApp(options: AppOptions): App {
   /** Scroll: moves the selection in a list, turns the page in a chat. No gateway call. */
   function move(step: number): void {
     if (screen.name === 'inbox') {
-      const last = screen.chats.length - 1 + (screen.box === HOME ? HOME_LINKS.length : 0)
+      const last = Math.max(0, screen.chats.length + screen.links.length - 1)
       const cursor = Math.max(0, Math.min(last, screen.cursor + step))
       if (cursor === screen.cursor) return
       screen = { ...screen, cursor }
       selectedId = screen.chats[cursor]?.id ?? null
-      void track(drawInbox(screen.box, screen.chats, cursor))
+      void track(drawInbox(screen.box, screen.chats, cursor, screen.links))
     } else if (screen.name === 'chat' && !screen.reply) {
       const page = Math.max(0, Math.min(screen.pages.length - 1, screen.page + step))
       if (page === screen.page) return
@@ -489,7 +508,7 @@ export function createApp(options: AppOptions): App {
         log(`createStartUpPageContainer failed: ${StartUpPageCreateResult[result] ?? result}`)
         return
       }
-      inboxShown = { title: 'Messenger', rows: Array.from({ length: INBOX_ROWS }, (_, index) => rows[index] ?? BLANK) }
+      inboxShown = { title: 'Messenger', rows }
       bridge.onEvenHubEvent(onEvent)
       await openInbox(HOME)
     },

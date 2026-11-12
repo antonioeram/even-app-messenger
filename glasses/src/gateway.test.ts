@@ -208,4 +208,19 @@ describe('gateway client', () => {
     expect(error.kind).toBe('http')
     expect(error.message).toContain('WhatsApp is not connected')
   })
+
+  it('reads the number of chats in each box', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ unread: 1, unanswered: 12, all: 437 }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    expect(await client.counts()).toEqual({ unread: 1, unanswered: 12, all: 437 })
+    expect(calls[0]?.url).toBe('https://gw.example/counts')
+  })
+
+  it('rejects counts that are not numbers', async () => {
+    const { fetchFn } = fakeFetch(() => json({ unread: 'many' }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    expect((await failure(client.counts())).kind).toBe('invalid')
+  })
 })

@@ -51,8 +51,16 @@ export interface Transcript {
   lang: string
 }
 
+/** Number of chats in each box. */
+export interface Counts {
+  unread: number
+  unanswered: number
+  all: number
+}
+
 export interface GatewayClient {
   chats(filter?: ChatFilter): Promise<Chat[]>
+  counts(): Promise<Counts>
   messages(chatId: string): Promise<Conversation>
   /** Clears the gateway's unread counter; sends no read receipt to WhatsApp. */
   markRead(chatId: string): Promise<void>
@@ -142,6 +150,19 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
         throw new GatewayError('invalid', 'response has no chats list')
       }
       return body.chats.map(parseChat)
+    },
+
+    async counts() {
+      const body = await getJson('/counts')
+      if (
+        !isRecord(body) ||
+        typeof body.unread !== 'number' ||
+        typeof body.unanswered !== 'number' ||
+        typeof body.all !== 'number'
+      ) {
+        throw new GatewayError('invalid', 'response has no counts')
+      }
+      return { unread: body.unread, unanswered: body.unanswered, all: body.all }
     },
 
     async messages(chatId) {

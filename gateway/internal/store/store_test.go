@@ -317,3 +317,23 @@ func TestOpenUpgradeDerivesSenderIDFromStoredPhoneNumbers(t *testing.T) {
 		t.Errorf("messages after upgrade = %+v", got)
 	}
 }
+
+func TestCountsPerBox(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	s.SaveMessage(ctx, msg("unread", "m1", 0, "new"))
+	s.AddUnread(ctx, "unread", 2)
+	s.SaveMessage(ctx, msg("waiting", "m2", 1, "ping"))
+	s.SaveMessage(ctx, msg("answered", "m3", 2, "ping"))
+	mine := msg("answered", "m4", 3, "pong")
+	mine.FromMe = true
+	s.SaveMessage(ctx, mine)
+	s.UpsertChat(ctx, Chat{ID: "contact-without-messages", Name: "Nobody"})
+
+	got, err := s.Counts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Counts{Unread: 1, Unanswered: 1, All: 3}); got != want {
+		t.Errorf("counts = %+v, want %+v", got, want)
+	}
+}

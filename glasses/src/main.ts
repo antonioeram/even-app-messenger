@@ -43,6 +43,9 @@ const gateway: GatewayClient = gatewayUrl
       async chats() {
         throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
       },
+      async counts() {
+        throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
+      },
       async messages() {
         throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
       },

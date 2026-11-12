@@ -10,7 +10,15 @@ import {
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
 import { createApp, type GlassesBridge } from './app'
-import { GatewayError, type Chat, type Conversation, type GatewayClient, type Message, type Transcript } from './gateway'
+import {
+  GatewayError,
+  type Chat,
+  type Conversation,
+  type Counts,
+  type GatewayClient,
+  type Message,
+  type Transcript,
+} from './gateway'
 
 type BoxInput = {
   xPosition?: number
@@ -170,6 +178,7 @@ function fakeGateway(
     chats?: Step<Chat[]>[]
     messages?: Step<Message[]>[]
     transcripts?: Step<Transcript>[]
+    counts?: Step<Counts>
     sends?: (GatewayError | undefined)[]
   } = {},
 ) {
@@ -180,6 +189,12 @@ function fakeGateway(
     filters: [] as (string | undefined)[],
     messageCalls: [] as string[],
     readCalls: [] as string[],
+    countCalls: 0,
+    async counts(): Promise<Counts> {
+      gateway.countCalls += 1
+      if (options.counts instanceof GatewayError) throw options.counts
+      return options.counts ?? { unread: 2, unanswered: 5, all: 9 }
+    },
     recordings: [] as Uint8Array[],
     sent: [] as { chatId: string; text: string }[],
     async markRead(chatId: string): Promise<void> {
@@ -291,7 +306,7 @@ describe('inbox', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unread (2)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Familia  11.11', 'ok', '  [Unanswered]', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (2)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Familia  11.11', 'ok', '  Unanswered (5)', '  All chats (9)'])
     expect(bridge.brightness).toEqual([4, 2, 2, 2])
   })
 
@@ -300,9 +315,10 @@ describe('inbox', () => {
     const { bridge, app } = setup(gateway)
     await app.start()
 
+    const rebuilds = bridge.rebuilds
     bridge.emit(scrollDown)
     await app.idle()
-    expect(bridge.lines).toEqual(['Unread (2)', '* Ana Pop  09:36', 'Vii maine? (2)', '> Familia  11.11', 'ok', '  [Unanswered]', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (2)', '* Ana Pop  09:36', 'Vii maine? (2)', '> Familia  11.11', 'ok', '  Unanswered (5)', '  All chats (9)'])
     expect(bridge.brightness).toEqual([2, 4, 2, 2])
 
     bridge.emit(scrollUp)
@@ -310,7 +326,7 @@ describe('inbox', () => {
     expect(bridge.lines[1]).toBe('> Ana Pop  09:36')
     expect(gateway.chatCalls).toBe(1)
     // Moving the selection never redraws the whole page.
-    expect(bridge.rebuilds).toBe(0)
+    expect(bridge.rebuilds).toBe(rebuilds)
   })
 
   it('stops at the ends of the list', async () => {
@@ -324,7 +340,7 @@ describe('inbox', () => {
     bridge.emit(scrollDown)
     await app.idle()
 
-    expect(bridge.lines.at(-1)).toBe('> [All chats]')
+    expect(bridge.lines.at(-1)).toBe('> All chats (9)')
   })
 
   it('shows the reason on the glasses when the gateway call fails', async () => {
@@ -344,7 +360,7 @@ describe('inbox', () => {
     bridge.emit(click)
     await app.idle()
 
-    expect(bridge.lines).toEqual(['Unread (1)', '> Ana Pop  09:36', 'Vii maine? (2)', '  [Unanswered]', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (1)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Unanswered (5)', '  All chats (9)'])
   })
 
   it('asks the gateway for unread chats first', async () => {
@@ -361,7 +377,7 @@ describe('inbox', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unread (0)', '> [Unanswered]', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (0)', '> Unanswered (5)', '  All chats (9)'])
   })
 
   it('opens the box with all chats from the extra row', async () => {
@@ -896,8 +912,9 @@ describe('avatars', () => {
     await app.idle()
 
     // The fake renderer returns no bytes for an empty slot.
-    expect(bridge.avatars).toEqual(['AP', '', '', ''])
-    expect(bridge.lines).toEqual(['Unread (1)', '> Ana Pop  09:36', 'Vii maine? (2)', '  [Unanswered]', '  [All chats]'])
+    // One box fewer, so the page was laid out again with three slots.
+    expect(bridge.avatars).toEqual(['AP', '', ''])
+    expect(bridge.lines).toEqual(['Unread (1)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Unanswered (5)', '  All chats (9)'])
   })
 
   it('falls back to boxes without avatars when the glasses refuse a page with images', async () => {
@@ -932,5 +949,71 @@ describe('avatars', () => {
     expect(bridge.avatars).toEqual([])
     expect(bridge.imageSends).toBe(0)
     expect(bridge.lines[0]).toBe('Unread (2)')
+  })
+})
+
+describe('home links', () => {
+  it('shows how many chats each other box holds', async () => {
+    const { bridge, app } = setup(fakeGateway({ counts: { unread: 2, unanswered: 12, all: 437 } }))
+
+    await app.start()
+
+    expect(bridge.lines.slice(-2)).toEqual(['  Unanswered (12)', '  All chats (437)'])
+  })
+
+  it('shows the links without numbers when the counts cannot be read', async () => {
+    const { bridge, app } = setup(fakeGateway({ counts: new GatewayError('http', 'HTTP 404') }))
+
+    await app.start()
+
+    expect(bridge.lines.slice(-2)).toEqual(['  Unanswered', '  All chats'])
+  })
+
+  it('asks for the counts only for the home box', async () => {
+    const gateway = fakeGateway()
+    const { bridge, app } = setup(gateway)
+    await app.start()
+    for (let i = 0; i < 3; i += 1) bridge.emit(scrollDown)
+    bridge.emit(click)
+    await app.idle()
+
+    expect(bridge.lines[0]).toBe('All chats (2)')
+    expect(gateway.countCalls).toBe(1)
+  })
+})
+
+describe('boxes on screen', () => {
+  const boxCount = (bridge: FakeBridge) => bridge.brightness.length
+
+  it('draws one box per row and no empty ones', async () => {
+    const { bridge, app } = setup(fakeGateway({ chats: [[]] }))
+
+    await app.start()
+
+    expect(bridge.lines).toEqual(['Unread (0)', '> Unanswered (5)', '  All chats (9)'])
+    expect(boxCount(bridge)).toBe(2)
+  })
+
+  it('lays the page out again when the number of rows changes', async () => {
+    const { bridge, app } = setup(fakeGateway({ chats: [[ana, family], [ana]] }))
+    await app.start()
+    expect(boxCount(bridge)).toBe(4)
+
+    bridge.emit(foregroundEnter)
+    await app.idle()
+
+    expect(boxCount(bridge)).toBe(3)
+  })
+
+  it('says so when another box has no chats', async () => {
+    const { bridge, app } = setup(fakeGateway({ chats: [[ana], []] }))
+    await app.start()
+    bridge.emit(scrollDown)
+    bridge.emit(click)
+    await app.idle()
+
+    expect(bridge.lines[0]).toBe('Unanswered (0)')
+    expect(bridge.text).toContain('No chats here')
+    expect(boxCount(bridge)).toBe(1)
   })
 })

@@ -2,7 +2,8 @@
 //
 // Two layouts. The inbox is a header and four bordered boxes; it is created
 // at start-up and then only its texts change (textContainerUpgrade, which is
-// flicker-free and proven on real glasses). A chat is a header and message
+// flicker-free and proven on real glasses); the page is laid out again only
+// when the number of boxes changes. A chat is a header and message
 // bubbles, left for theirs and right for mine; its geometry depends on the
 // messages, so each page is a rebuild.
 
@@ -126,18 +127,18 @@ export function avatarSlot(index: number): { containerID: number; containerName:
 function inboxBoxes(title: string, rows: readonly Row[], avatars: boolean): TextContainerProperty[] {
   const boxes = [head(title)]
   const left = avatars ? AVATAR_SIZE + AVATAR_GAP : 0
-  for (let index = 0; index < INBOX_ROWS; index += 1) {
-    const row = rows[index] ?? { text: '', selected: false, avatar: '' }
+  // One box per row: a list shorter than the screen leaves the rest empty.
+  rows.slice(0, INBOX_ROWS).forEach((row, index) => {
     const frame = { x: left, y: rowTop(index), width: SCREEN.width - left, height: ROW_HEIGHT }
     // Two lines of text need all the height a row has, so the padding is small.
     boxes.push(box(index, rowName(index), frame, row.text, row.selected, 2))
-  }
+  })
   return boxes
 }
 
 /** Empty image containers, one per row; their pixels are sent after the page exists. */
-function avatarSlots(): ImageContainerProperty[] {
-  return Array.from({ length: INBOX_ROWS }, (_, index) => {
+function avatarSlots(count: number): ImageContainerProperty[] {
+  return Array.from({ length: Math.min(count, INBOX_ROWS) }, (_, index) => {
     const y = rowTop(index) + Math.floor((ROW_HEIGHT - AVATAR_SIZE) / 2)
     return new ImageContainerProperty({ xPosition: 0, yPosition: y, width: AVATAR_SIZE, height: AVATAR_SIZE, ...avatarSlot(index) })
   })
@@ -145,7 +146,7 @@ function avatarSlots(): ImageContainerProperty[] {
 
 function inboxLayout(title: string, rows: readonly Row[], avatars: boolean) {
   const textObject = inboxBoxes(title, rows, avatars)
-  const imageObject = avatars ? avatarSlots() : []
+  const imageObject = avatars ? avatarSlots(rows.length) : []
   return { containerTotalNum: textObject.length + imageObject.length, textObject, imageObject }
 }
 

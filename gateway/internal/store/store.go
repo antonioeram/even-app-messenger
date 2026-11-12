@@ -229,6 +229,23 @@ func (s *Store) Chats(ctx context.Context, limit int, filter Filter) ([]Chat, er
 	return chats, rows.Err()
 }
 
+// Counts holds the number of chats in each box.
+type Counts struct {
+	Unread, Unanswered, All int
+}
+
+// Counts returns how many chats each filter selects.
+func (s *Store) Counts(ctx context.Context) (Counts, error) {
+	var c Counts
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(unread > 0), 0),
+			COALESCE(SUM(unread = 0 AND last_from_me = 0 AND is_group = 0), 0),
+			COUNT(*)
+		FROM chats WHERE last_ts > 0`).Scan(&c.Unread, &c.Unanswered, &c.All)
+	return c, err
+}
+
 // Chat returns one chat; ok is false when it does not exist.
 func (s *Store) Chat(ctx context.Context, id string) (c Chat, ok bool, err error) {
 	c, err = scanChat(s.db.QueryRowContext(ctx, `SELECT `+chatColumns+` FROM chats WHERE id = ?`, id))

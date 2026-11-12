@@ -65,6 +65,7 @@ func New(cfg config.Config, opts Options) http.Handler {
 	})))
 
 	mux.Handle("GET /chats", auth(http.HandlerFunc(a.chats)))
+	mux.Handle("GET /counts", auth(http.HandlerFunc(a.counts)))
 	mux.Handle("GET /chats/{id}/messages", auth(http.HandlerFunc(a.messages)))
 	mux.Handle("POST /chats/{id}/read", auth(http.HandlerFunc(a.markRead)))
 	mux.Handle("POST /chats/{id}/send", auth(http.HandlerFunc(a.send)))

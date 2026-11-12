@@ -646,3 +646,22 @@ func TestTranscribeFailureAndMissingTranscriber(t *testing.T) {
 		t.Errorf("no token: status = %d, want 401", rec.Code)
 	}
 }
+
+func (f *fakeStore) Counts(context.Context) (store.Counts, error) {
+	return store.Counts{Unread: 1, Unanswered: 12, All: 437}, nil
+}
+
+func TestCountsReportsTheSizeOfEachBox(t *testing.T) {
+	h := newStoreHandler(config.Config{Token: "s3cret"}, sampleStore(), nil)
+	if rec := do(t, h, http.MethodGet, "/counts", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("without token: status = %d, want 401", rec.Code)
+	}
+	rec := do(t, h, http.MethodGet, "/counts", map[string]string{"Authorization": "Bearer s3cret"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	if body["unread"] != float64(1) || body["unanswered"] != float64(12) || body["all"] != float64(437) {
+		t.Errorf("body = %v", body)
+	}
+}
