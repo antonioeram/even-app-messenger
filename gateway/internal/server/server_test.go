@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/antonioeram/even-app-messenger/gateway/internal/config"
+	"github.com/antonioeram/even-app-messenger/gateway/internal/store"
 )
 
 var fixedNow = time.Date(2026, 11, 12, 9, 41, 7, 0, time.UTC)
@@ -199,5 +201,239 @@ func TestHelloIsOpenWhenNoTokenIsConfigured(t *testing.T) {
 	rec := do(t, newTestHandler(config.Config{}), http.MethodGet, "/hello", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
+
+// --- stage 1: chats and messages ---
+
+type fakeStore struct {
+	chats     []store.Chat
+	messages  map[string][]store.Message
+	gotLimit  int
+	gotBefore time.Time
+}
+
+func (f *fakeStore) Chats(_ context.Context, limit int) ([]store.Chat, error) {
+	f.gotLimit = limit
+	return f.chats, nil
+}
+
+func (f *fakeStore) Chat(_ context.Context, id string) (store.Chat, bool, error) {
+	for _, c := range f.chats {
+		if c.ID == id {
+			return c, true, nil
+		}
+	}
+	return store.Chat{}, false, nil
+}
+
+func (f *fakeStore) Messages(_ context.Context, chatID string, limit int, before time.Time) ([]store.Message, error) {
+	f.gotLimit, f.gotBefore = limit, before
+	return f.messages[chatID], nil
+}
+
+func newStoreHandler(cfg config.Config, st ChatStore, link func() LinkStatus) http.Handler {
+	if cfg.CORSOrigins == nil {
+		cfg.CORSOrigins = []string{"*"}
+	}
+	return New(cfg, Options{
+		Version: "test", Hostname: "homelab",
+		Now:   func() time.Time { return fixedNow },
+		Store: st, Link: link,
+		Location: time.UTC,
+	})
+}
+
+func sampleStore() *fakeStore {
+	return &fakeStore{
+		chats: []store.Chat{
+			{ID: "40711@s.whatsapp.net", Name: "Ștefan Țîru", Unread: 2, LastTime: fixedNow.Add(-5 * time.Minute), Preview: "Vii mâine? 👍"},
+			{ID: "123@g.us", Name: "Familia", Group: true, LastTime: fixedNow.Add(-26 * time.Hour), Preview: "ok"},
+		},
+		messages: map[string][]store.Message{
+			"40711@s.whatsapp.net": {
+				{ChatID: "40711@s.whatsapp.net", ID: "m1", Sender: "Ștefan Țîru", Time: fixedNow.Add(-6 * time.Minute), Text: "Bună", Kind: "text"},
+				{ChatID: "40711@s.whatsapp.net", ID: "m2", Sender: "", FromMe: true, Time: fixedNow.Add(-5 * time.Minute), Text: "Vii mâine? 👍", Kind: "text"},
+			},
+		},
+	}
+}
+
+func TestChatsListsChatsInASCII(t *testing.T) {
+	rec := do(t, newStoreHandler(config.Config{}, sampleStore(), nil), http.MethodGet, "/chats", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	chats := decode(t, rec)["chats"].([]any)
+	if len(chats) != 2 {
+		t.Fatalf("got %d chats", len(chats))
+	}
+	first := chats[0].(map[string]any)
+	if first["id"] != "40711@s.whatsapp.net" || first["name"] != "Stefan Tiru" || first["preview"] != "Vii maine?" {
+		t.Errorf("first chat = %v", first)
+	}
+	if first["unread"] != float64(2) || first["group"] != false {
+		t.Errorf("first chat = %v", first)
+	}
+	// Today's messages show the hour, older ones the date.
+	if first["clock"] != "09:36" {
+		t.Errorf("clock = %v, want 09:36", first["clock"])
+	}
+	if second := chats[1].(map[string]any); second["clock"] != "11.11" || second["group"] != true {
+		t.Errorf("second chat = %v", second)
+	}
+}
+
+func TestChatsRequiresToken(t *testing.T) {
+	h := newStoreHandler(config.Config{Token: "s3cret"}, sampleStore(), nil)
+	if rec := do(t, h, http.MethodGet, "/chats", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("without token: status = %d, want 401", rec.Code)
+	}
+	if rec := do(t, h, http.MethodGet, "/chats/x/messages", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("messages without token: status = %d, want 401", rec.Code)
+	}
+	if rec := do(t, h, http.MethodGet, "/admin/status", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("admin status without token: status = %d, want 401", rec.Code)
+	}
+}
+
+func TestChatsLimitIsCappedAndDefaulted(t *testing.T) {
+	st := sampleStore()
+	h := newStoreHandler(config.Config{}, st, nil)
+	do(t, h, http.MethodGet, "/chats", nil)
+	if st.gotLimit != 20 {
+		t.Errorf("default limit = %d, want 20", st.gotLimit)
+	}
+	do(t, h, http.MethodGet, "/chats?limit=500", nil)
+	if st.gotLimit != 100 {
+		t.Errorf("capped limit = %d, want 100", st.gotLimit)
+	}
+	if rec := do(t, h, http.MethodGet, "/chats?limit=abc", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad limit: status = %d, want 400", rec.Code)
+	}
+}
+
+func TestMessagesReturnsChatAndMessages(t *testing.T) {
+	rec := do(t, newStoreHandler(config.Config{}, sampleStore(), nil), http.MethodGet, "/chats/40711@s.whatsapp.net/messages", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	if chat := body["chat"].(map[string]any); chat["name"] != "Stefan Tiru" {
+		t.Errorf("chat = %v", chat)
+	}
+	messages := body["messages"].([]any)
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages", len(messages))
+	}
+	m1, m2 := messages[0].(map[string]any), messages[1].(map[string]any)
+	if m1["sender"] != "Stefan Tiru" || m1["text"] != "Buna" || m1["from_me"] != false || m1["clock"] != "09:35" {
+		t.Errorf("m1 = %v", m1)
+	}
+	if m2["sender"] != "Me" || m2["from_me"] != true || m2["text"] != "Vii maine?" {
+		t.Errorf("m2 = %v", m2)
+	}
+}
+
+func TestMessagesPassesBeforeAndLimit(t *testing.T) {
+	st := sampleStore()
+	h := newStoreHandler(config.Config{}, st, nil)
+	do(t, h, http.MethodGet, "/chats/40711@s.whatsapp.net/messages?limit=5&before=2026-11-12T09:00:00Z", nil)
+	if st.gotLimit != 5 || !st.gotBefore.Equal(time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)) {
+		t.Errorf("limit=%d before=%v", st.gotLimit, st.gotBefore)
+	}
+	if rec := do(t, h, http.MethodGet, "/chats/40711@s.whatsapp.net/messages?before=yesterday", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad before: status = %d, want 400", rec.Code)
+	}
+}
+
+func TestMessagesUnknownChatIs404(t *testing.T) {
+	rec := do(t, newStoreHandler(config.Config{}, sampleStore(), nil), http.MethodGet, "/chats/nope/messages", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", rec.Code)
+	}
+}
+
+func TestChatWithoutNameFallsBackToItsNumber(t *testing.T) {
+	st := &fakeStore{chats: []store.Chat{{ID: "40722123456@s.whatsapp.net", LastTime: fixedNow, Preview: "x"}}}
+	rec := do(t, newStoreHandler(config.Config{}, st, nil), http.MethodGet, "/chats", nil)
+	first := decode(t, rec)["chats"].([]any)[0].(map[string]any)
+	if first["name"] != "+40722123456" {
+		t.Errorf("name = %v, want +40722123456", first["name"])
+	}
+}
+
+func TestChatsWithoutStoreIs503(t *testing.T) {
+	rec := do(t, newTestHandler(config.Config{}), http.MethodGet, "/chats", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestAdminStatusReportsLinkStateAndQR(t *testing.T) {
+	link := func() LinkStatus { return LinkStatus{State: "pairing", QR: "2@abc,def"} }
+	rec := do(t, newStoreHandler(config.Config{}, sampleStore(), link), http.MethodGet, "/admin/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := decode(t, rec)
+	if body["state"] != "pairing" {
+		t.Errorf("state = %v", body["state"])
+	}
+	qr, _ := body["qr_png"].(string)
+	if !strings.HasPrefix(qr, "data:image/png;base64,") || len(qr) < 200 {
+		t.Errorf("qr_png = %.40q (len %d)", qr, len(qr))
+	}
+	// The raw pairing code is a credential for linking a device; only the image leaves the gateway.
+	if strings.Contains(rec.Body.String(), "2@abc") {
+		t.Error("response leaks the raw pairing code")
+	}
+}
+
+func TestAdminStatusWithoutQRWhenConnected(t *testing.T) {
+	link := func() LinkStatus { return LinkStatus{State: "connected", Account: "+40711"} }
+	body := decode(t, do(t, newStoreHandler(config.Config{}, sampleStore(), link), http.MethodGet, "/admin/status", nil))
+	if body["state"] != "connected" || body["account"] != "+40711" || body["qr_png"] != "" {
+		t.Errorf("body = %v", body)
+	}
+}
+
+func TestAdminPageIsHTMLAndCarriesNoToken(t *testing.T) {
+	rec := do(t, newStoreHandler(config.Config{Token: "s3cret"}, sampleStore(), nil), http.MethodGet, "/admin", nil)
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("status = %d, type = %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if strings.Contains(rec.Body.String(), "s3cret") {
+		t.Error("admin page embeds the token")
+	}
+}
+
+func TestAdminPairRestartsPairing(t *testing.T) {
+	calls := 0
+	h := New(config.Config{Token: "s3cret", CORSOrigins: []string{"*"}}, Options{
+		Version: "test",
+		Pair:    func() { calls++ },
+	})
+	if rec := do(t, h, http.MethodPost, "/admin/pair", nil); rec.Code != http.StatusUnauthorized || calls != 0 {
+		t.Fatalf("without token: status = %d, calls = %d", rec.Code, calls)
+	}
+	rec := do(t, h, http.MethodPost, "/admin/pair", map[string]string{"Authorization": "Bearer s3cret"})
+	if rec.Code != http.StatusAccepted || calls != 1 {
+		t.Errorf("status = %d, calls = %d; want 202, 1", rec.Code, calls)
+	}
+}
+
+func TestAdminPairWithoutWhatsAppIs503(t *testing.T) {
+	rec := do(t, newTestHandler(config.Config{}), http.MethodPost, "/admin/pair", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestAdminPageReadsTheTokenFromTheURLFragment(t *testing.T) {
+	// A fragment never reaches the server or its logs, unlike a query string.
+	body := do(t, newTestHandler(config.Config{}), http.MethodGet, "/admin", nil).Body.String()
+	if !strings.Contains(body, "location.hash") || !strings.Contains(body, "replaceState") {
+		t.Error("admin page does not read and clear a #token= fragment")
 	}
 }

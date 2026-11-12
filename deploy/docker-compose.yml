@@ -12,6 +12,8 @@ services:
       GATEWAY_ADDR: ":8080"
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in deploy/.env (openssl rand -hex 32)}
       GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS:-*}
+      GATEWAY_DATA_DIR: /data
+      GATEWAY_WHATSAPP: ${GATEWAY_WHATSAPP:-on}
       TZ: ${TZ:-Europe/Bucharest}
     ports:
       # Loopback by default: nginx on the same host is the only client.

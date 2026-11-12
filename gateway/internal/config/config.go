@@ -16,6 +16,11 @@ type Config struct {
 	// CORSOrigins lists the origins allowed to call the API from a browser
 	// or WebView. A single "*" allows every origin.
 	CORSOrigins []string
+	// DataDir holds the message database and the WhatsApp session.
+	// Empty disables storage: the gateway then serves /health and /hello only.
+	DataDir string
+	// WhatsApp enables the WhatsApp connection. It needs DataDir.
+	WhatsApp bool
 }
 
 // Load reads the configuration through getenv (os.Getenv in production).
@@ -24,7 +29,9 @@ func Load(getenv func(string) string) (Config, error) {
 		Addr:        valueOr(getenv("GATEWAY_ADDR"), ":8080"),
 		Token:       getenv("GATEWAY_TOKEN"),
 		CORSOrigins: splitList(valueOr(getenv("GATEWAY_CORS_ORIGINS"), "*")),
+		DataDir:     strings.TrimSpace(getenv("GATEWAY_DATA_DIR")),
 	}
+	cfg.WhatsApp = cfg.DataDir != "" && !strings.EqualFold(strings.TrimSpace(getenv("GATEWAY_WHATSAPP")), "off")
 	for _, origin := range cfg.CORSOrigins {
 		if err := validateOrigin(origin); err != nil {
 			return Config{}, fmt.Errorf("GATEWAY_CORS_ORIGINS: %w", err)

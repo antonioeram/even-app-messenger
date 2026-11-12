@@ -12,14 +12,40 @@ export class GatewayError extends Error {
   }
 }
 
-export interface Hello {
+export interface Chat {
+  id: string
+  name: string
+  group: boolean
+  unread: number
+  /** Hour of the newest message for today, its date otherwise. */
+  clock: string
+  /** Text of the newest message. */
+  preview: string
+}
+
+export interface Message {
+  id: string
+  sender: string
+  fromMe: boolean
+  clock: string
   text: string
-  time: string
+}
+
+export interface Conversation {
+  chat: Chat
+  /** Oldest first. */
+  messages: Message[]
 }
 
 export interface GatewayClient {
-  hello(): Promise<Hello>
+  chats(): Promise<Chat[]>
+  messages(chatId: string): Promise<Conversation>
 }
+
+// A list on the glasses holds 20 items; one screen of text holds fewer
+// messages than this, so one page of each is enough for stage 1.
+const CHAT_LIMIT = 20
+const MESSAGE_LIMIT = 30
 
 export interface GatewayClientOptions {
   baseUrl: string
@@ -68,14 +94,49 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
   }
 
   return {
-    async hello() {
-      const body = await getJson('/hello')
-      if (!isRecord(body) || typeof body.text !== 'string') {
-        throw new GatewayError('invalid', 'response has no text field')
+    async chats() {
+      const body = await getJson(`/chats?limit=${CHAT_LIMIT}`)
+      if (!isRecord(body) || !Array.isArray(body.chats)) {
+        throw new GatewayError('invalid', 'response has no chats list')
       }
-      return { text: body.text, time: typeof body.time === 'string' ? body.time : '' }
+      return body.chats.map(parseChat)
+    },
+
+    async messages(chatId) {
+      const body = await getJson(`/chats/${encodeURIComponent(chatId)}/messages?limit=${MESSAGE_LIMIT}`)
+      if (!isRecord(body) || !isRecord(body.chat) || !Array.isArray(body.messages)) {
+        throw new GatewayError('invalid', 'response has no chat or messages')
+      }
+      return { chat: parseChat(body.chat), messages: body.messages.map(parseMessage) }
     },
   }
+}
+
+function parseChat(raw: unknown): Chat {
+  if (!isRecord(raw) || typeof raw.id !== 'string') throw new GatewayError('invalid', 'chat without id')
+  return {
+    id: raw.id,
+    name: text(raw.name),
+    group: raw.group === true,
+    unread: typeof raw.unread === 'number' ? raw.unread : 0,
+    clock: text(raw.clock),
+    preview: text(raw.preview),
+  }
+}
+
+function parseMessage(raw: unknown): Message {
+  if (!isRecord(raw) || typeof raw.id !== 'string') throw new GatewayError('invalid', 'message without id')
+  return {
+    id: raw.id,
+    sender: text(raw.sender),
+    fromMe: raw.from_me === true,
+    clock: text(raw.clock),
+    text: text(raw.text),
+  }
+}
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value : ''
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

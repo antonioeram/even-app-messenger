@@ -1,7 +1,8 @@
 // Command gateway is the home-server side of the Even G2 messenger.
 //
-// Stage 0 serves /health and /hello only. Later stages add the WhatsApp
-// session, the email connector, storage and the admin page.
+// Without GATEWAY_DATA_DIR it serves /health and /hello only. With it, it
+// keeps a WhatsApp session, stores chats and messages in SQLite and serves
+// them at /chats, plus the pairing page at /admin. Stage 1 is read-only.
 package main
 
 import (
@@ -14,12 +15,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 	_ "time/tzdata" // the container image has no zoneinfo; TZ must still work
 
 	"github.com/antonioeram/even-app-messenger/gateway/internal/config"
 	"github.com/antonioeram/even-app-messenger/gateway/internal/server"
+	"github.com/antonioeram/even-app-messenger/gateway/internal/store"
+	"github.com/antonioeram/even-app-messenger/gateway/internal/whatsapp"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -53,21 +57,41 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		hostname = "unknown"
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	opts := server.Options{Version: version, Hostname: hostname, Logger: logger}
+	if cfg.DataDir != "" {
+		messages, err := store.Open(ctx, filepath.Join(cfg.DataDir, "messages.db"))
+		if err != nil {
+			return err
+		}
+		defer messages.Close()
+		opts.Store = messages
+
+		if cfg.WhatsApp {
+			wa, err := whatsapp.Open(ctx, filepath.Join(cfg.DataDir, "whatsapp.db"), messages, logger)
+			if err != nil {
+				return err
+			}
+			defer wa.Close()
+			wa.Start(ctx)
+			opts.Pair = wa.Pair
+			opts.Link = func() server.LinkStatus {
+				st := wa.Status()
+				return server.LinkStatus{State: st.State, QR: st.QR, Account: st.Account}
+			}
+		}
+	}
+
 	srv := &http.Server{
-		Addr: cfg.Addr,
-		Handler: server.New(cfg, server.Options{
-			Version:  version,
-			Hostname: hostname,
-			Logger:   logger,
-		}),
+		Addr:              cfg.Addr,
+		Handler:           server.New(cfg, opts),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	errc := make(chan error, 1)
 	go func() {
@@ -76,6 +100,8 @@ func run(cfg config.Config, logger *slog.Logger) error {
 			"version", version,
 			"token_required", cfg.Token != "",
 			"cors_origins", cfg.CORSOrigins,
+			"data_dir", cfg.DataDir,
+			"whatsapp", cfg.WhatsApp,
 		)
 		errc <- srv.ListenAndServe()
 	}()

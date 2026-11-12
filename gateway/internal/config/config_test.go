@@ -53,3 +53,28 @@ func TestLoadRejectsOriginThatIsNotAnOrigin(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadDataDirAndWhatsApp(t *testing.T) {
+	cases := []struct {
+		name         string
+		env          map[string]string
+		wantDir      string
+		wantWhatsApp bool
+	}{
+		{"no data dir disables storage and whatsapp", map[string]string{}, "", false},
+		{"data dir enables whatsapp", map[string]string{"GATEWAY_DATA_DIR": "/data"}, "/data", true},
+		{"whatsapp can be switched off", map[string]string{"GATEWAY_DATA_DIR": "/data", "GATEWAY_WHATSAPP": "off"}, "/data", false},
+		{"whatsapp needs a data dir", map[string]string{"GATEWAY_WHATSAPP": "on"}, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := Load(func(key string) string { return c.env[key] })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.DataDir != c.wantDir || cfg.WhatsApp != c.wantWhatsApp {
+				t.Errorf("DataDir=%q WhatsApp=%v, want %q %v", cfg.DataDir, cfg.WhatsApp, c.wantDir, c.wantWhatsApp)
+			}
+		})
+	}
+}

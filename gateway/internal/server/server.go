@@ -19,6 +19,14 @@ type Options struct {
 	Hostname string
 	Now      func() time.Time
 	Logger   *slog.Logger
+	// Store backs /chats; nil answers 503 (stage 0 behaviour).
+	Store ChatStore
+	// Link reports the WhatsApp session state for the admin page.
+	Link func() LinkStatus
+	// Pair asks for fresh WhatsApp pairing codes after the first ones expired.
+	Pair func()
+	// Location is the time zone of the clock strings; nil means time.Local.
+	Location *time.Location
 }
 
 // New returns the gateway handler: routes wrapped in logging and CORS.
@@ -29,7 +37,11 @@ func New(cfg config.Config, opts Options) http.Handler {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
+	if opts.Location == nil {
+		opts.Location = time.Local
+	}
 	auth := requireToken(cfg.Token)
+	a := &api{store: opts.Store, link: opts.Link, pair: opts.Pair, now: opts.Now, loc: opts.Location}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +54,12 @@ func New(cfg config.Config, opts Options) http.Handler {
 			"time": now.Format(time.RFC3339),
 		})
 	})))
+
+	mux.Handle("GET /chats", auth(http.HandlerFunc(a.chats)))
+	mux.Handle("GET /chats/{id}/messages", auth(http.HandlerFunc(a.messages)))
+	mux.HandleFunc("GET /admin", a.adminPage)
+	mux.Handle("GET /admin/status", auth(http.HandlerFunc(a.adminStatus)))
+	mux.Handle("POST /admin/pair", auth(http.HandlerFunc(a.adminPair)))
 
 	return logRequests(opts.Logger, cors(cfg.CORSOrigins, jsonErrors(mux)))
 }

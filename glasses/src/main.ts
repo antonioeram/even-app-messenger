@@ -39,7 +39,10 @@ function log(line: string): void {
 const gateway: GatewayClient = gatewayUrl
   ? createGatewayClient({ baseUrl: gatewayUrl, token: gatewayToken || undefined })
   : {
-      async hello() {
+      async chats() {
+        throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
+      },
+      async messages() {
         throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
       },
     }
