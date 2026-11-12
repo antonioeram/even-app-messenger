@@ -1,9 +1,12 @@
 // Stage 1 app: an inbox list of WhatsApp chats and a reading screen.
 //
 // Every screen is text in one container, updated in place.
-// Inbox:  scroll moves the selection, click opens the chat, double click
-//         asks to exit.
-// Chat:   click reloads, double click goes back to the inbox.
+// Unanswered: the home box, chats waiting for my reply. Scroll moves the
+//             selection, click opens, double click asks to exit. Its last
+//             row opens the box with all chats.
+// All chats:  the same list without the filter; double click goes back.
+// Chat:       scroll turns pages (older / newer), click reloads, double
+//             click goes back to the box it was opened from.
 
 import {
   OsEventTypeList,
@@ -12,10 +15,10 @@ import {
   type EvenHubEvent,
   type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
-import { GatewayError, type Chat, type GatewayClient, type GatewayErrorKind } from './gateway'
+import { GatewayError, type Chat, type ChatFilter, type GatewayClient, type GatewayErrorKind } from './gateway'
 import { gestureFromEvent, sourceFromEvent } from './gestures'
-import { mainTextUpdate, MAX_UPGRADE_CHARS, startupPage } from './screen'
-import { chatText, inboxText } from './views'
+import { mainTextUpdate, startupPage } from './screen'
+import { chatPages, inboxText } from './views'
 
 /** The part of EvenAppBridge the app uses; tests supply a fake. */
 export interface GlassesBridge {
@@ -53,17 +56,25 @@ const ERROR_LABEL: Record<GatewayErrorKind, string> = {
   invalid: 'Unexpected response',
 }
 
+type Box = 'unanswered' | 'all'
+
+const BOX_TITLE: Record<Box, string> = { unanswered: 'Unanswered', all: 'All chats' }
+const BOX_FILTER: Record<Box, ChatFilter | undefined> = { unanswered: 'unanswered', all: undefined }
+/** Last row of the unanswered box; selecting it opens all chats. */
+const ALL_CHATS_ROW = '[All chats]'
+
 type Screen =
-  /** The chat list is shown; cursor is the index of the selected chat. */
-  | { name: 'inbox'; chats: Chat[]; cursor: number }
-  /** A message is shown instead of the list: loading, empty or failed. */
-  | { name: 'inboxText' }
-  | { name: 'chat'; chat: Chat }
+  /** A chat list is shown; cursor is the selected row (chats.length = the extra row). */
+  | { name: 'inbox'; box: Box; chats: Chat[]; cursor: number }
+  /** A message is shown instead of the list: loading or failed. */
+  | { name: 'inboxText'; box: Box }
+  /** pages is empty while the chat is loading or after a failure. */
+  | { name: 'chat'; box: Box; chat: Chat; pages: string[]; page: number }
 
 export function createApp(options: AppOptions): App {
   const { bridge, gateway, gatewayUrl, log } = options
   const pending = new Set<Promise<unknown>>()
-  let screen: Screen = { name: 'inboxText' }
+  let screen: Screen = { name: 'inboxText', box: 'unanswered' }
   let loading: Promise<void> | null = null
   /** The chat to select when the inbox is shown again. */
   let selectedId: string | null = null
@@ -96,48 +107,55 @@ export function createApp(options: AppOptions): App {
     await show(`Gateway unreachable\n${gatewayUrl}\n${label}: ${detail}\n\n${hint}`)
   }
 
-  function openInbox(): Promise<void> {
+  function drawInbox(box: Box, chats: Chat[], cursor: number): Promise<void> {
+    return show(inboxText(BOX_TITLE[box], chats, cursor, box === 'unanswered' ? ALL_CHATS_ROW : undefined))
+  }
+
+  function openInbox(box: Box): Promise<void> {
     return load(async () => {
       try {
-        const chats = await gateway.chats()
-        if (chats.length === 0) {
-          screen = { name: 'inboxText' }
-          await show(`No chats yet\nLink WhatsApp at\n${gatewayUrl}/admin\n\n${INBOX_HINT}`)
-        } else {
-          const cursor = Math.max(0, chats.findIndex((chat) => chat.id === selectedId))
-          screen = { name: 'inbox', chats, cursor }
-          await show(inboxText(chats, cursor))
-        }
-        log(`inbox: ${chats.length} chats`)
+        const chats = await gateway.chats(BOX_FILTER[box])
+        const cursor = Math.max(0, chats.findIndex((chat) => chat.id === selectedId))
+        screen = { name: 'inbox', box, chats, cursor }
+        await drawInbox(box, chats, cursor)
+        log(`${box}: ${chats.length} chats`)
       } catch (error) {
-        screen = { name: 'inboxText' }
-        await showFailure(error, INBOX_HINT)
+        screen = { name: 'inboxText', box }
+        await showFailure(error, box === 'unanswered' ? INBOX_HINT : CHAT_HINT)
       }
     })
   }
 
-  function openChat(chat: Chat): Promise<void> {
+  function openChat(box: Box, chat: Chat): Promise<void> {
     return load(async () => {
-      screen = { name: 'chat', chat }
+      screen = { name: 'chat', box, chat, pages: [], page: 0 }
       try {
         const conversation = await gateway.messages(chat.id)
-        screen = { name: 'chat', chat: conversation.chat }
-        await show(chatText(conversation.chat, conversation.messages, MAX_UPGRADE_CHARS))
-        log(`chat: ${conversation.messages.length} messages`)
+        const pages = chatPages(conversation.chat, conversation.messages)
+        screen = { name: 'chat', box, chat: conversation.chat, pages, page: 0 }
+        await show(pages[0] ?? '')
+        log(`chat: ${conversation.messages.length} messages, ${pages.length} pages`)
       } catch (error) {
         await showFailure(error, CHAT_HINT)
       }
     })
   }
 
-  /** Moves the inbox selection; a redraw only, no gateway call. */
-  function moveCursor(step: number): void {
-    if (screen.name !== 'inbox') return
-    const cursor = Math.max(0, Math.min(screen.chats.length - 1, screen.cursor + step))
-    if (cursor === screen.cursor) return
-    screen = { ...screen, cursor }
-    selectedId = screen.chats[cursor]?.id ?? null
-    void track(show(inboxText(screen.chats, cursor)))
+  /** Scroll: moves the selection in a list, turns the page in a chat. No gateway call. */
+  function move(step: number): void {
+    if (screen.name === 'inbox') {
+      const last = screen.chats.length - (screen.box === 'unanswered' ? 0 : 1)
+      const cursor = Math.max(0, Math.min(last, screen.cursor + step))
+      if (cursor === screen.cursor) return
+      screen = { ...screen, cursor }
+      selectedId = screen.chats[cursor]?.id ?? null
+      void track(drawInbox(screen.box, screen.chats, cursor))
+    } else if (screen.name === 'chat') {
+      const page = Math.max(0, Math.min(screen.pages.length - 1, screen.page + step))
+      if (page === screen.page) return
+      screen = { ...screen, page }
+      void track(show(screen.pages[page] ?? ''))
+    }
   }
 
   function onClick(): void {
@@ -146,16 +164,29 @@ export function createApp(options: AppOptions): App {
         const chat = screen.chats[screen.cursor]
         if (chat) {
           selectedId = chat.id
-          void openChat(chat)
+          void openChat(screen.box, chat)
+        } else if (screen.box === 'unanswered') {
+          void openInbox('all')
         }
         return
       }
       case 'inboxText':
-        void openInbox()
+        void openInbox(screen.box)
         return
       case 'chat':
-        void openChat(screen.chat)
+        void openChat(screen.box, screen.chat)
         return
+    }
+  }
+
+  function onDoubleClick(): void {
+    if (screen.name === 'chat') {
+      void openInbox(screen.box)
+    } else if (screen.box === 'all') {
+      void openInbox('unanswered')
+    } else {
+      // Mode 1 shows the system exit dialog, which the root page must use.
+      void track(bridge.shutDownPageContainer(1)).catch((error) => log(`exit failed: ${String(error)}`))
     }
   }
 
@@ -173,22 +204,17 @@ export function createApp(options: AppOptions): App {
         onClick()
         break
       case 'scrollDown':
-        moveCursor(1)
+        move(1)
         break
       case 'scrollUp':
-        moveCursor(-1)
+        move(-1)
         break
       case 'doubleClick':
-        if (screen.name === 'chat') {
-          void openInbox()
-        } else {
-          // Mode 1 shows the system exit dialog, which the root page must use.
-          void track(bridge.shutDownPageContainer(1)).catch((error) => log(`exit failed: ${String(error)}`))
-        }
+        onDoubleClick()
         break
       case 'foregroundEnter':
-        if (screen.name === 'chat') void openChat(screen.chat)
-        else void openInbox()
+        if (screen.name === 'chat') void openChat(screen.box, screen.chat)
+        else void openInbox(screen.box)
         break
       default:
         break
@@ -203,7 +229,7 @@ export function createApp(options: AppOptions): App {
         return
       }
       bridge.onEvenHubEvent(onEvent)
-      await openInbox()
+      await openInbox('unanswered')
     },
 
     async idle() {

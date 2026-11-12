@@ -153,4 +153,13 @@ describe('gateway client', () => {
 
     expect((await failure(client.messages('nope'))).kind).toBe('http')
   })
+
+  it('asks for unanswered chats only when told to', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ chats: [] }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    await client.chats('unanswered')
+
+    expect(calls[0]?.url).toBe('https://gw.example/chats?limit=20&filter=unanswered')
+  })
 })

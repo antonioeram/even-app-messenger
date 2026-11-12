@@ -207,14 +207,15 @@ func TestHelloIsOpenWhenNoTokenIsConfigured(t *testing.T) {
 // --- stage 1: chats and messages ---
 
 type fakeStore struct {
-	chats     []store.Chat
-	messages  map[string][]store.Message
-	gotLimit  int
-	gotBefore time.Time
+	chats         []store.Chat
+	messages      map[string][]store.Message
+	gotLimit      int
+	gotBefore     time.Time
+	gotUnanswered bool
 }
 
-func (f *fakeStore) Chats(_ context.Context, limit int) ([]store.Chat, error) {
-	f.gotLimit = limit
+func (f *fakeStore) Chats(_ context.Context, limit int, unanswered bool) ([]store.Chat, error) {
+	f.gotLimit, f.gotUnanswered = limit, unanswered
 	return f.chats, nil
 }
 
@@ -435,5 +436,42 @@ func TestAdminPageReadsTheTokenFromTheURLFragment(t *testing.T) {
 	body := do(t, newTestHandler(config.Config{}), http.MethodGet, "/admin", nil).Body.String()
 	if !strings.Contains(body, "location.hash") || !strings.Contains(body, "replaceState") {
 		t.Error("admin page does not read and clear a #token= fragment")
+	}
+}
+
+func TestChatsFilterUnanswered(t *testing.T) {
+	st := sampleStore()
+	h := newStoreHandler(config.Config{}, st, nil)
+	do(t, h, http.MethodGet, "/chats", nil)
+	if st.gotUnanswered {
+		t.Error("no filter: store was asked for unanswered chats only")
+	}
+	do(t, h, http.MethodGet, "/chats?filter=unanswered", nil)
+	if !st.gotUnanswered {
+		t.Error("filter=unanswered was not passed to the store")
+	}
+	if rec := do(t, h, http.MethodGet, "/chats?filter=bogus", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown filter: status = %d, want 400", rec.Code)
+	}
+}
+
+func TestEmojiOnlyTextGetsALabel(t *testing.T) {
+	st := &fakeStore{
+		chats: []store.Chat{{ID: "a@s.whatsapp.net", Name: "Ana", LastTime: fixedNow, Preview: "😀😀"}},
+		messages: map[string][]store.Message{"a@s.whatsapp.net": {
+			{ChatID: "a@s.whatsapp.net", ID: "m1", Sender: "Ana", Time: fixedNow, Text: "👍"},
+			{ChatID: "a@s.whatsapp.net", ID: "m2", Sender: "Ana", Time: fixedNow, Text: ""},
+		}},
+	}
+	h := newStoreHandler(config.Config{}, st, nil)
+	if first := decode(t, do(t, h, http.MethodGet, "/chats", nil))["chats"].([]any)[0].(map[string]any); first["preview"] != "[emoji]" {
+		t.Errorf("preview = %v, want [emoji]", first["preview"])
+	}
+	messages := decode(t, do(t, h, http.MethodGet, "/chats/a@s.whatsapp.net/messages", nil))["messages"].([]any)
+	if got := messages[0].(map[string]any)["text"]; got != "[emoji]" {
+		t.Errorf("emoji-only text = %v, want [emoji]", got)
+	}
+	if got := messages[1].(map[string]any)["text"]; got != "" {
+		t.Errorf("empty text = %v, want empty", got)
 	}
 }

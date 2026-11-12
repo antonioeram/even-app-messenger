@@ -37,8 +37,11 @@ export interface Conversation {
   messages: Message[]
 }
 
+/** 'unanswered': direct chats whose newest message is not mine. */
+export type ChatFilter = 'unanswered'
+
 export interface GatewayClient {
-  chats(): Promise<Chat[]>
+  chats(filter?: ChatFilter): Promise<Chat[]>
   messages(chatId: string): Promise<Conversation>
 }
 
@@ -94,8 +97,8 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
   }
 
   return {
-    async chats() {
-      const body = await getJson(`/chats?limit=${CHAT_LIMIT}`)
+    async chats(filter) {
+      const body = await getJson(`/chats?limit=${CHAT_LIMIT}${filter ? `&filter=${filter}` : ''}`)
       if (!isRecord(body) || !Array.isArray(body.chats)) {
         throw new GatewayError('invalid', 'response has no chats list')
       }

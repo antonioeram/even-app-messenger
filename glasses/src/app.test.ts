@@ -85,8 +85,10 @@ function fakeGateway(options: { chats?: Step<Chat[]>[]; messages?: Step<Message[
   const messageSteps = options.messages ?? [[message('Buna')]]
   const gateway = {
     chatCalls: 0,
+    filters: [] as (string | undefined)[],
     messageCalls: [] as string[],
-    async chats(): Promise<Chat[]> {
+    async chats(filter?: 'unanswered'): Promise<Chat[]> {
+      gateway.filters.push(filter)
       const step = chatSteps[Math.min(gateway.chatCalls, chatSteps.length - 1)]
       gateway.chatCalls += 1
       if (step instanceof GatewayError) throw step
@@ -168,7 +170,7 @@ describe('inbox', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Inbox 1/2', '> (2) Ana Pop: Vii maine?', '  Familia: ok'])
+    expect(bridge.lines).toEqual(['Unanswered (2)', '> 09:36 (2) Ana Pop: Vii maine?', '  11.11 Familia: ok', '  [All chats]'])
   })
 
   it('moves the selection down and up on scroll, without calling the gateway', async () => {
@@ -178,11 +180,11 @@ describe('inbox', () => {
 
     bridge.emit(scrollDown)
     await app.idle()
-    expect(bridge.lines).toEqual(['Inbox 2/2', '  (2) Ana Pop: Vii maine?', '> Familia: ok'])
+    expect(bridge.lines).toEqual(['Unanswered (2)', '  09:36 (2) Ana Pop: Vii maine?', '> 11.11 Familia: ok', '  [All chats]'])
 
     bridge.emit(scrollUp)
     await app.idle()
-    expect(bridge.lines[1]).toBe('> (2) Ana Pop: Vii maine?')
+    expect(bridge.lines[1]).toBe('> 09:36 (2) Ana Pop: Vii maine?')
     expect(gateway.chatCalls).toBe(1)
   })
 
@@ -194,9 +196,10 @@ describe('inbox', () => {
     bridge.emit(scrollDown)
     bridge.emit(scrollDown)
     bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
     await app.idle()
 
-    expect(bridge.lines[0]).toBe('Inbox 2/2')
+    expect(bridge.lines.at(-1)).toBe('> [All chats]')
   })
 
   it('shows the reason on the glasses when the gateway call fails', async () => {
@@ -216,15 +219,55 @@ describe('inbox', () => {
     bridge.emit(click)
     await app.idle()
 
-    expect(bridge.lines).toEqual(['Inbox 1/1', '> (2) Ana Pop: Vii maine?'])
+    expect(bridge.lines).toEqual(['Unanswered (1)', '> 09:36 (2) Ana Pop: Vii maine?', '  [All chats]'])
   })
 
-  it('explains an empty inbox', async () => {
+  it('asks the gateway for unanswered chats first', async () => {
+    const gateway = fakeGateway()
+    const { app } = setup(gateway)
+
+    await app.start()
+
+    expect(gateway.filters).toEqual(['unanswered'])
+  })
+
+  it('shows an empty box with the way to all chats', async () => {
     const { bridge, app } = setup(fakeGateway({ chats: [[]] }))
 
     await app.start()
 
-    expect(bridge.text).toContain('No chats yet')
+    expect(bridge.lines).toEqual(['Unanswered (0)', '> [All chats]'])
+  })
+
+  it('opens the box with all chats from the extra row', async () => {
+    const gateway = fakeGateway()
+    const { bridge, app } = setup(gateway)
+    await app.start()
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+
+    bridge.emit(click)
+    await app.idle()
+
+    expect(gateway.filters).toEqual(['unanswered', undefined])
+    expect(bridge.lines).toEqual(['All chats (2)', '> 09:36 (2) Ana Pop: Vii maine?', '  11.11 Familia: ok'])
+  })
+
+  it('goes back from all chats to the unanswered box on double click, without asking to exit', async () => {
+    const gateway = fakeGateway()
+    const { bridge, app } = setup(gateway)
+    await app.start()
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+    bridge.emit(click)
+    await app.idle()
+
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    expect(bridge.shutdowns).toEqual([])
+    expect(gateway.filters).toEqual(['unanswered', undefined, 'unanswered'])
+    expect(bridge.lines[0]).toBe('Unanswered (2)')
   })
 
   it('reloads the list when the app returns to the foreground, keeping the selection', async () => {
@@ -237,7 +280,7 @@ describe('inbox', () => {
     await app.idle()
 
     expect(gateway.chatCalls).toBe(2)
-    expect(bridge.lines.at(-1)).toBe('> Familia: ok')
+    expect(bridge.lines[2]).toBe('> 11.11 Familia: ok')
   })
 
   it('asks to exit on double click', async () => {
@@ -266,7 +309,7 @@ describe('opening a chat', () => {
     const { bridge, gateway } = await openChat(1)
 
     expect(gateway.messageCalls).toEqual(['123@g.us'])
-    expect(bridge.lines[0]).toBe('Familia')
+    expect(bridge.lines[0]).toBe('Familia 1/1')
     expect(bridge.text).toContain('Buna')
   })
 
@@ -336,7 +379,7 @@ describe('inside a chat', () => {
 
     expect(bridge.shutdowns).toEqual([])
     expect(gateway.chatCalls).toBe(2)
-    expect(bridge.lines[0]).toBe('Inbox 1/2')
+    expect(bridge.lines[0]).toBe('Unanswered (2)')
   })
 
   it('goes back to the inbox from a failed chat', async () => {
@@ -346,7 +389,7 @@ describe('inside a chat', () => {
     bridge.emit(doubleClick)
     await app.idle()
 
-    expect(bridge.lines[0]).toBe('Inbox 1/2')
+    expect(bridge.lines[0]).toBe('Unanswered (2)')
   })
 
   it('returns to the inbox with the chat it came from still selected', async () => {
@@ -355,7 +398,7 @@ describe('inside a chat', () => {
     bridge.emit(doubleClick)
     await app.idle()
 
-    expect(bridge.lines.at(-1)).toBe('> Familia: ok')
+    expect(bridge.lines[2]).toBe('> 11.11 Familia: ok')
   })
 
   it('does not move the inbox selection while a chat is open', async () => {
@@ -365,7 +408,47 @@ describe('inside a chat', () => {
     bridge.emit(doubleClick)
     await app.idle()
 
-    expect(bridge.lines[1]).toBe('> (2) Ana Pop: Vii maine?')
+    expect(bridge.lines[1]).toBe('> 09:36 (2) Ana Pop: Vii maine?')
+  })
+
+  it('pages through older messages on scroll, without calling the gateway', async () => {
+    const many = Array.from({ length: 20 }, (_, i) => message(`message number ${i}`))
+    const gateway = fakeGateway({ messages: [many] })
+    const { bridge, app } = await openChat(0, gateway)
+    expect(bridge.lines[0]).toBe('Ana Pop 1/3')
+    expect(bridge.text).toContain('message number 19')
+
+    bridge.emit(scrollDown)
+    await app.idle()
+    expect(bridge.lines[0]).toBe('Ana Pop 2/3')
+
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+    await app.idle()
+    expect(bridge.lines[0]).toBe('Ana Pop 3/3')
+    expect(bridge.text).toContain('message number 0')
+
+    bridge.emit(scrollUp)
+    await app.idle()
+    expect(bridge.lines[0]).toBe('Ana Pop 2/3')
+    expect(gateway.messageCalls).toHaveLength(1)
+  })
+
+  it('returns to all chats when the chat was opened from there', async () => {
+    const gateway = fakeGateway()
+    const { bridge, app } = setup(gateway)
+    await app.start()
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+    bridge.emit(click)
+    await app.idle()
+    bridge.emit(click)
+    await app.idle()
+
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    expect(bridge.lines[0]).toBe('All chats (2)')
   })
 })
 

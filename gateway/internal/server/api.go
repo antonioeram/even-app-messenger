@@ -16,7 +16,7 @@ import (
 
 // ChatStore is the part of the message store the API reads.
 type ChatStore interface {
-	Chats(ctx context.Context, limit int) ([]store.Chat, error)
+	Chats(ctx context.Context, limit int, unanswered bool) ([]store.Chat, error)
 	Chat(ctx context.Context, id string) (store.Chat, bool, error)
 	Messages(ctx context.Context, chatID string, limit int, before time.Time) ([]store.Message, error)
 }
@@ -75,7 +75,16 @@ func (a *api) chats(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	chats, err := a.store.Chats(r.Context(), limit)
+	var unanswered bool
+	switch r.URL.Query().Get("filter") {
+	case "":
+	case "unanswered":
+		unanswered = true
+	default:
+		writeError(w, http.StatusBadRequest, "filter must be unanswered or absent")
+		return
+	}
+	chats, err := a.store.Chats(r.Context(), limit, unanswered)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read chats")
 		return
@@ -135,7 +144,7 @@ func (a *api) messages(w http.ResponseWriter, r *http.Request) {
 			FromMe: m.FromMe,
 			Time:   m.Time.UTC().Format(time.RFC3339),
 			Clock:  a.clock(m.Time),
-			Text:   translit.ASCII(m.Text),
+			Text:   displayText(m.Text),
 			Kind:   m.Kind,
 		})
 	}
@@ -180,12 +189,22 @@ func (a *api) chatJSON(c store.Chat) chatJSON {
 	if name == "" {
 		name = nameFromID(c.ID)
 	}
-	out := chatJSON{ID: c.ID, Name: name, Group: c.Group, Unread: c.Unread, Preview: translit.ASCII(c.Preview)}
+	out := chatJSON{ID: c.ID, Name: name, Group: c.Group, Unread: c.Unread, Preview: displayText(c.Preview)}
 	if !c.LastTime.IsZero() {
 		out.Time = c.LastTime.UTC().Format(time.RFC3339)
 		out.Clock = a.clock(c.LastTime)
 	}
 	return out
+}
+
+// displayText reduces message text to ASCII. A message made only of emoji
+// would vanish, so it is shown as a label instead.
+func displayText(text string) string {
+	ascii := translit.ASCII(text)
+	if ascii == "" && strings.TrimSpace(text) != "" {
+		return "[emoji]"
+	}
+	return ascii
 }
 
 // clock formats t for the glasses: the hour for today, the date otherwise.

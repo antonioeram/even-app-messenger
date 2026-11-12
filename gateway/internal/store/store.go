@@ -24,6 +24,8 @@ type Chat struct {
 	LastTime time.Time
 	// Preview is the text of the newest message.
 	Preview string
+	// LastFromMe is true when the newest message is my own.
+	LastFromMe bool
 }
 
 // Message is one stored message.
@@ -51,7 +53,8 @@ CREATE TABLE IF NOT EXISTS chats (
 	is_group INTEGER NOT NULL DEFAULT 0,
 	unread   INTEGER NOT NULL DEFAULT 0,
 	last_ts  INTEGER NOT NULL DEFAULT 0,
-	preview  TEXT NOT NULL DEFAULT ''
+	preview  TEXT NOT NULL DEFAULT '',
+	last_from_me INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
 	chat_id TEXT NOT NULL,
@@ -80,7 +83,28 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create message store schema: %w", err)
 	}
+	if err := upgrade(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("upgrade message store: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// upgrade adds what databases created by earlier versions lack.
+func upgrade(ctx context.Context, db *sql.DB) error {
+	var has int
+	err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('chats') WHERE name = 'last_from_me'`).Scan(&has)
+	if err != nil || has > 0 {
+		return err
+	}
+	// 0.1.0 did not record who wrote the newest message; derive it once.
+	_, err = db.ExecContext(ctx, `
+		ALTER TABLE chats ADD COLUMN last_from_me INTEGER NOT NULL DEFAULT 0;
+		UPDATE chats SET last_from_me = COALESCE((
+			SELECT m.from_me FROM messages m WHERE m.chat_id = chats.id
+			ORDER BY m.ts DESC, m.id DESC LIMIT 1), 0);`)
+	return err
 }
 
 // Close releases the database.
@@ -123,8 +147,8 @@ func (s *Store) SaveMessage(ctx context.Context, m Message) (bool, error) {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE chats SET last_ts = ?, preview = ? WHERE id = ? AND last_ts <= ?`,
-		ts, m.Text, m.ChatID, ts); err != nil {
+		UPDATE chats SET last_ts = ?, preview = ?, last_from_me = ? WHERE id = ? AND last_ts <= ?`,
+		ts, m.Text, boolInt(m.FromMe), m.ChatID, ts); err != nil {
 		return false, err
 	}
 	return inserted > 0, tx.Commit()
@@ -142,12 +166,18 @@ func (s *Store) AddUnread(ctx context.Context, chatID string, delta int) error {
 	return err
 }
 
-const chatColumns = `id, name, is_group, unread, last_ts, preview`
+const chatColumns = `id, name, is_group, unread, last_ts, preview, last_from_me`
 
 // Chats lists chats that have messages: unread ones first, then newest first.
-func (s *Store) Chats(ctx context.Context, limit int) ([]Chat, error) {
+// With unanswered it lists only direct chats whose newest message is not
+// mine, that is, the ones waiting for a reply.
+func (s *Store) Chats(ctx context.Context, limit int, unanswered bool) ([]Chat, error) {
+	where := `last_ts > 0`
+	if unanswered {
+		where += ` AND last_from_me = 0 AND is_group = 0`
+	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+chatColumns+` FROM chats WHERE last_ts > 0
+		SELECT `+chatColumns+` FROM chats WHERE `+where+`
 		ORDER BY (unread > 0) DESC, last_ts DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -207,12 +237,13 @@ type scanner interface{ Scan(dest ...any) error }
 
 func scanChat(row scanner) (Chat, error) {
 	var c Chat
-	var group int
+	var group, fromMe int
 	var ts int64
-	if err := row.Scan(&c.ID, &c.Name, &group, &c.Unread, &ts, &c.Preview); err != nil {
+	if err := row.Scan(&c.ID, &c.Name, &group, &c.Unread, &ts, &c.Preview, &fromMe); err != nil {
 		return Chat{}, err
 	}
 	c.Group = group != 0
+	c.LastFromMe = fromMe != 0
 	if ts > 0 {
 		c.LastTime = time.UnixMilli(ts).UTC()
 	}

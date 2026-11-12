@@ -28,7 +28,7 @@ func TestSaveMessageCreatesChatWithPreview(t *testing.T) {
 	if _, err := s.SaveMessage(ctx, msg("ana@s.whatsapp.net", "m1", 0, "Salut")); err != nil {
 		t.Fatal(err)
 	}
-	chats, err := s.Chats(ctx, 10)
+	chats, err := s.Chats(ctx, 10, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestChatsOrderUnreadFirstThenNewest(t *testing.T) {
 	if err := s.SetUnread(ctx, "old-unread", 2); err != nil {
 		t.Fatal(err)
 	}
-	chats, _ := s.Chats(ctx, 10)
+	chats, _ := s.Chats(ctx, 10, false)
 	got := []string{chats[0].ID, chats[1].ID, chats[2].ID}
 	want := []string{"old-unread", "newest-read", "mid-read"}
 	for i := range want {
@@ -75,7 +75,7 @@ func TestChatsHonoursLimit(t *testing.T) {
 	s, ctx := open(t), context.Background()
 	s.SaveMessage(ctx, msg("a", "m1", 0, "a"))
 	s.SaveMessage(ctx, msg("b", "m2", 1, "b"))
-	chats, _ := s.Chats(ctx, 1)
+	chats, _ := s.Chats(ctx, 1, false)
 	if len(chats) != 1 || chats[0].ID != "b" {
 		t.Errorf("chats = %+v", chats)
 	}
@@ -151,7 +151,7 @@ func TestOlderMessageDoesNotReplacePreview(t *testing.T) {
 	s, ctx := open(t), context.Background()
 	s.SaveMessage(ctx, msg("a", "new", 10, "new"))
 	s.SaveMessage(ctx, msg("a", "old", 0, "old"))
-	chats, _ := s.Chats(ctx, 1)
+	chats, _ := s.Chats(ctx, 1, false)
 	if chats[0].Preview != "new" || !chats[0].LastTime.Equal(t0.Add(10*time.Minute)) {
 		t.Errorf("chat = %+v", chats[0])
 	}
@@ -185,5 +185,64 @@ func TestDataSurvivesReopen(t *testing.T) {
 	got, _ := s.Messages(ctx, "a", 5, time.Time{})
 	if len(got) != 1 || got[0].Text != "kept" {
 		t.Errorf("messages = %+v", got)
+	}
+}
+
+func TestUnansweredListsDirectChatsWhoseNewestMessageIsIncoming(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	s.SaveMessage(ctx, msg("waiting", "m1", 0, "ping"))
+	s.SaveMessage(ctx, msg("answered", "m2", 1, "ping"))
+	mine := msg("answered", "m3", 2, "pong")
+	mine.FromMe = true
+	s.SaveMessage(ctx, mine)
+	s.UpsertChat(ctx, Chat{ID: "group", Name: "Familia", Group: true})
+	s.SaveMessage(ctx, msg("group", "m4", 3, "hello all"))
+
+	chats, err := s.Chats(ctx, 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chats) != 1 || chats[0].ID != "waiting" {
+		t.Errorf("unanswered = %+v, want only the chat waiting for a reply", chats)
+	}
+}
+
+func TestOlderOwnMessageDoesNotMarkChatAsAnswered(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	s.SaveMessage(ctx, msg("a", "new", 10, "still waiting"))
+	old := msg("a", "old", 0, "mine")
+	old.FromMe = true
+	s.SaveMessage(ctx, old) // history arrives after the live message
+	chats, _ := s.Chats(ctx, 10, true)
+	if len(chats) != 1 {
+		t.Errorf("unanswered = %+v, want the chat", chats)
+	}
+}
+
+func TestOpenUpgradesADatabaseFromBeforeTheAnsweredFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "messages.db")
+	ctx := context.Background()
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := msg("answered", "m1", 0, "pong")
+	mine.FromMe = true
+	s.SaveMessage(ctx, mine)
+	s.SaveMessage(ctx, msg("waiting", "m2", 1, "ping"))
+	// Recreate the 0.1.0 shape: no flag column.
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE chats DROP COLUMN last_from_me`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	chats, _ := s.Chats(ctx, 10, true)
+	if len(chats) != 1 || chats[0].ID != "waiting" {
+		t.Errorf("unanswered after upgrade = %+v", chats)
 	}
 }
