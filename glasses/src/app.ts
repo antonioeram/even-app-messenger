@@ -8,7 +8,7 @@ import {
   type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
 import { GatewayError, type GatewayClient, type GatewayErrorKind } from './gateway'
-import { gestureFromEvent } from './gestures'
+import { gestureFromEvent, sourceFromEvent } from './gestures'
 import { mainTextUpdate, startupPage } from './screen'
 
 /** The part of EvenAppBridge the app uses; tests supply a fake. */
@@ -50,6 +50,8 @@ export function createApp(options: AppOptions): App {
   const { bridge, gateway, gatewayUrl, log } = options
   const pending = new Set<Promise<unknown>>()
   let refreshing: Promise<void> | null = null
+  // Shown on the glasses: proof that an input arrived, and from which touchpad.
+  let lastInput = ''
 
   function track<T>(promise: Promise<T>): Promise<T> {
     pending.add(promise)
@@ -66,13 +68,14 @@ export function createApp(options: AppOptions): App {
   function refresh(): Promise<void> {
     refreshing ??= track(
       (async () => {
+        const input = lastInput ? `\nInput: ${lastInput}` : ''
         try {
           const hello = await gateway.hello()
-          await show(`${hello.text}\n\n${HINT}`)
+          await show(`${hello.text}${input}\n\n${HINT}`)
           log('gateway ok')
         } catch (error) {
           const { label, detail } = describeError(error)
-          await show(`Gateway unreachable\n${gatewayUrl}\n${label}: ${detail}\n\n${HINT}`)
+          await show(`Gateway unreachable\n${gatewayUrl}\n${label}: ${detail}${input}\n\n${HINT}`)
           log(`gateway error: ${label}: ${detail}`)
         } finally {
           refreshing = null
@@ -89,7 +92,10 @@ export function createApp(options: AppOptions): App {
       if (!isStream(event)) log(`unknown event: ${rawShape(event)}`)
       return
     }
-    log(`gesture: ${gesture}`)
+    const source = sourceFromEvent(event)
+    const input = source ? `${gesture} (${source})` : gesture
+    log(`gesture: ${input}`)
+    if (gesture !== 'foregroundEnter' && gesture !== 'foregroundExit') lastInput = input
     switch (gesture) {
       case 'click':
       case 'foregroundEnter':

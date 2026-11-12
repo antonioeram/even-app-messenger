@@ -9,7 +9,7 @@ import {
   Text_ItemEvent,
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
-import { gestureFromEvent } from './gestures'
+import { gestureFromEvent, sourceFromEvent } from './gestures'
 
 const text = (eventType?: OsEventTypeList): EvenHubEvent => ({ textEvent: new Text_ItemEvent({ eventType }) })
 const list = (eventType?: OsEventTypeList): EvenHubEvent => ({ listEvent: new List_ItemEvent({ eventType }) })
@@ -80,5 +80,25 @@ describe('gestureFromEvent', () => {
       sysEvent: new Sys_ItemEvent({ eventSource: EventSourceType.TOUCH_EVENT_FORM_DUMMY_NULL }),
     }
     expect(gestureFromEvent(noSource)).toBeNull()
+  })
+})
+
+describe('sourceFromEvent', () => {
+  const from = (eventSource: EventSourceType): EvenHubEvent => ({
+    sysEvent: new Sys_ItemEvent({ eventType: OsEventTypeList.DOUBLE_CLICK_EVENT, eventSource }),
+  })
+
+  it('names the ring', () => {
+    expect(sourceFromEvent(from(EventSourceType.TOUCH_EVENT_FROM_RING))).toBe('ring')
+  })
+
+  it('names each temple', () => {
+    expect(sourceFromEvent(from(EventSourceType.TOUCH_EVENT_FROM_GLASSES_R))).toBe('right temple')
+    expect(sourceFromEvent(from(EventSourceType.TOUCH_EVENT_FROM_GLASSES_L))).toBe('left temple')
+  })
+
+  it('returns null when the event carries no source', () => {
+    expect(sourceFromEvent(sys(OsEventTypeList.FOREGROUND_ENTER_EVENT))).toBeNull()
+    expect(sourceFromEvent(text(OsEventTypeList.CLICK_EVENT))).toBeNull()
   })
 })

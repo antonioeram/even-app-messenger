@@ -1,6 +1,6 @@
 // Turns raw Even Hub events into the few gestures the app cares about.
 
-import { OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
+import { EventSourceType, OsEventTypeList, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
 
 export type Gesture =
   | 'click'
@@ -39,4 +39,18 @@ export function gestureFromEvent(event: EvenHubEvent): Gesture | null {
   if (sys.eventType !== undefined) return BY_TYPE[sys.eventType] ?? null
   // eventType 0 (click) is dropped on the way; a touch source marks the click.
   return sys.eventSource && !sys.imuData ? 'click' : null
+}
+
+export type InputSource = 'ring' | 'right temple' | 'left temple'
+
+const BY_SOURCE: Partial<Record<EventSourceType, InputSource>> = {
+  [EventSourceType.TOUCH_EVENT_FROM_RING]: 'ring',
+  [EventSourceType.TOUCH_EVENT_FROM_GLASSES_R]: 'right temple',
+  [EventSourceType.TOUCH_EVENT_FROM_GLASSES_L]: 'left temple',
+}
+
+/** Which touchpad produced the event; only system events carry it. */
+export function sourceFromEvent(event: EvenHubEvent): InputSource | null {
+  const source = event.sysEvent?.eventSource
+  return source === undefined ? null : (BY_SOURCE[source] ?? null)
 }

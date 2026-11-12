@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   AudioEvent,
+  EventSourceType,
   OsEventTypeList,
   StartUpPageCreateResult,
   Sys_ItemEvent,
@@ -200,6 +201,27 @@ describe('glasses app', () => {
     await app.idle()
 
     expect(logs).toContain('gesture: click')
+  })
+
+  it('logs where a gesture came from, so ring input can be told from the temples', async () => {
+    const { bridge, app, logs } = setup(gatewayReturning('Salut'))
+    await app.start()
+
+    bridge.emit({ sysEvent: new Sys_ItemEvent({ eventSource: EventSourceType.TOUCH_EVENT_FROM_RING }) })
+    await app.idle()
+
+    expect(logs).toContain('gesture: click (ring)')
+  })
+
+  it('shows the last input and its source on the glasses', async () => {
+    const { bridge, app } = setup(gatewayReturning('Salut'))
+    await app.start()
+    expect(bridge.shown).not.toContain('Input:')
+
+    bridge.emit({ sysEvent: new Sys_ItemEvent({ eventSource: EventSourceType.TOUCH_EVENT_FROM_RING }) })
+    await app.idle()
+
+    expect(bridge.shown).toContain('Input: click (ring)')
   })
 
   it('logs the raw shape of an event it does not recognise', async () => {
