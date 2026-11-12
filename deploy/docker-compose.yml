@@ -1,0 +1,23 @@
+name: even-messenger
+
+services:
+  gateway:
+    build:
+      context: ../gateway
+      args:
+        VERSION: ${GATEWAY_VERSION:-dev}
+    image: even-messenger-gateway:${GATEWAY_VERSION:-dev}
+    restart: unless-stopped
+    environment:
+      GATEWAY_ADDR: ":8080"
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in deploy/.env (openssl rand -hex 32)}
+      GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS:-*}
+      TZ: ${TZ:-Europe/Bucharest}
+    ports:
+      # Loopback by default: nginx on the same host is the only client.
+      - "${GATEWAY_PUBLISH:-127.0.0.1:8080}:8080"
+    volumes:
+      - gateway-data:/data
+
+volumes:
+  gateway-data:

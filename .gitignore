@@ -1,0 +1,22 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+*.ehpk
+
+# Go
+/gateway/gateway
+*.test
+*.out
+
+# Runtime data (WhatsApp session, SQLite)
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+.DS_Store
