@@ -8,6 +8,7 @@
 
 import {
   CreateStartUpPageContainer,
+  ImageContainerProperty,
   RebuildPageContainer,
   TextContainerProperty,
   TextContainerUpgrade,
@@ -24,8 +25,14 @@ const HEAD_HEIGHT = 30
 
 /** Boxes on the inbox page. */
 export const INBOX_ROWS = 4
-const ROW_HEIGHT = 62
-const ROW_PITCH = 64
+// Two lines of text need 60 px; what is left of the screen goes to the gaps.
+const ROW_HEIGHT = 60
+const ROW_PITCH = 66
+
+/** Side of the round avatar to the left of each inbox box. */
+export const AVATAR_SIZE = 56
+const AVATAR_GAP = 6
+const AVATAR_FIRST_ID = HEAD.id + 1 + INBOX_ROWS
 
 export const BUBBLE_WIDTH = 440
 const LINE_HEIGHT = 27
@@ -42,6 +49,8 @@ const BORDER = 9
 export interface Row {
   text: string
   selected: boolean
+  /** Initials for the avatar next to the box; empty for a row that is not a chat. */
+  avatar: string
 }
 
 /** One message bubble. lines is the number of text lines, which sets its height. */
@@ -107,27 +116,47 @@ function box(
 
 const rowName = (index: number) => `row${index + 1}`
 
-function inboxBoxes(title: string, rows: readonly Row[]): TextContainerProperty[] {
+const rowTop = (index: number) => HEAD_HEIGHT + index * ROW_PITCH
+
+/** Identity of the image container next to row index. */
+export function avatarSlot(index: number): { containerID: number; containerName: string } {
+  return { containerID: AVATAR_FIRST_ID + index, containerName: `avatar${index + 1}` }
+}
+
+function inboxBoxes(title: string, rows: readonly Row[], avatars: boolean): TextContainerProperty[] {
   const boxes = [head(title)]
+  const left = avatars ? AVATAR_SIZE + AVATAR_GAP : 0
   for (let index = 0; index < INBOX_ROWS; index += 1) {
-    const row = rows[index] ?? { text: '', selected: false }
-    const frame = { x: 0, y: HEAD_HEIGHT + index * ROW_PITCH, width: SCREEN.width, height: ROW_HEIGHT }
+    const row = rows[index] ?? { text: '', selected: false, avatar: '' }
+    const frame = { x: left, y: rowTop(index), width: SCREEN.width - left, height: ROW_HEIGHT }
     // Two lines of text need all the height a row has, so the padding is small.
     boxes.push(box(index, rowName(index), frame, row.text, row.selected, 2))
   }
   return boxes
 }
 
-/** The inbox layout as the start-up page. */
-export function startupInbox(title: string, rows: readonly Row[]): CreateStartUpPageContainer {
-  const textObject = inboxBoxes(title, rows)
-  return new CreateStartUpPageContainer({ containerTotalNum: textObject.length, textObject })
+/** Empty image containers, one per row; their pixels are sent after the page exists. */
+function avatarSlots(): ImageContainerProperty[] {
+  return Array.from({ length: INBOX_ROWS }, (_, index) => {
+    const y = rowTop(index) + Math.floor((ROW_HEIGHT - AVATAR_SIZE) / 2)
+    return new ImageContainerProperty({ xPosition: 0, yPosition: y, width: AVATAR_SIZE, height: AVATAR_SIZE, ...avatarSlot(index) })
+  })
+}
+
+function inboxLayout(title: string, rows: readonly Row[], avatars: boolean) {
+  const textObject = inboxBoxes(title, rows, avatars)
+  const imageObject = avatars ? avatarSlots() : []
+  return { containerTotalNum: textObject.length + imageObject.length, textObject, imageObject }
+}
+
+/** The inbox layout as the start-up page. avatars adds an image slot left of each box. */
+export function startupInbox(title: string, rows: readonly Row[], avatars = true): CreateStartUpPageContainer {
+  return new CreateStartUpPageContainer(inboxLayout(title, rows, avatars))
 }
 
 /** The inbox layout, for coming back from a chat. */
-export function inboxPage(title: string, rows: readonly Row[]): RebuildPageContainer {
-  const textObject = inboxBoxes(title, rows)
-  return new RebuildPageContainer({ containerTotalNum: textObject.length, textObject })
+export function inboxPage(title: string, rows: readonly Row[], avatars = true): RebuildPageContainer {
+  return new RebuildPageContainer(inboxLayout(title, rows, avatars))
 }
 
 /** Changes one inbox box in place. */

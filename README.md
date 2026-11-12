@@ -10,7 +10,7 @@ Screenshots are from the Even Hub simulator, with made-up data.
 
 ## What it does
 
-- **Unread box.** The home screen lists the chats with unread messages: time, name and the newest message.
+- **Unread box.** The home screen lists the chats with unread messages, four boxes per page: a round avatar with the person's initials, then name, time and the newest message.
 - **Unanswered and All chats.** Two more boxes: read chats that still wait for your reply, and every chat.
 - **Reading.** A chat opens as message bubbles, theirs on the left and yours on the right, each with the sender's name and the time. It opens on the newest page; scroll up for older messages.
 - **Voice reply.** Hold the touchpad and speak. The recording is transcribed on your server and the text appears on the glasses. A click sends it; a double click cancels. Nothing is sent without that click.

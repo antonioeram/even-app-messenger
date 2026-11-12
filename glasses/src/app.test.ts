@@ -3,6 +3,7 @@ import {
   AudioEvent,
   EventSourceType,
   OsEventTypeList,
+  ImageRawDataUpdateResult,
   StartUpPageCreateResult,
   Sys_ItemEvent,
   Text_ItemEvent,
@@ -22,11 +23,19 @@ type BoxInput = {
   isEventCapture?: number
   textColor?: number
 }
-type PageInput = { containerTotalNum?: number; textObject?: BoxInput[] }
+type PageInput = { containerTotalNum?: number; textObject?: BoxInput[]; imageObject?: BoxInput[] }
 
 /** Models the glasses: a page of text containers that can be replaced or updated in place. */
 class FakeBridge implements GlassesBridge {
   private boxes: BoxInput[] = []
+  private images: BoxInput[] = []
+  /** What each image container shows, by container id; the fake renderer encodes the initials as bytes. */
+  private drawn = new Map<number, string>()
+  /** Image updates sent to the glasses. */
+  imageSends = 0
+  /** Set to make the glasses refuse any page that has image containers. */
+  rejectImages = false
+  imageResult = ImageRawDataUpdateResult.success
   /** Text of the start-up page. */
   startText = ''
   /** Pages drawn with a full rebuild. */
@@ -39,10 +48,13 @@ class FakeBridge implements GlassesBridge {
   createResult = StartUpPageCreateResult.success
   private listener: ((event: EvenHubEvent) => void) | null = null
 
-  private setPage(page: PageInput) {
+  private setPage(page: PageInput): boolean {
     const boxes = page.textObject ?? []
+    const images = page.imageObject ?? []
+    if (this.rejectImages && images.length > 0) return false
     // What the Even app validates before a page reaches the glasses.
-    expect(page.containerTotalNum).toBe(boxes.length)
+    expect(page.containerTotalNum).toBe(boxes.length + images.length)
+    expect(new Set([...boxes, ...images].map((box) => box.containerID)).size).toBe(boxes.length + images.length)
     expect(boxes.filter((box) => box.isEventCapture === 1)).toHaveLength(1)
     expect(new Set(boxes.map((box) => box.containerID)).size).toBe(boxes.length)
     for (const box of boxes) {
@@ -51,18 +63,38 @@ class FakeBridge implements GlassesBridge {
       expect((box.yPosition ?? 0) + (box.height ?? 0)).toBeLessThanOrEqual(288)
     }
     this.boxes = boxes.map((box) => ({ ...box }))
+    this.images = images.map((box) => ({ ...box }))
+    // A new page starts with empty image containers.
+    this.drawn.clear()
+    return true
   }
 
   async createStartUpPageContainer(page: PageInput) {
-    this.setPage(page)
+    if (this.createResult !== StartUpPageCreateResult.success) return this.createResult
+    if (!this.setPage(page)) return StartUpPageCreateResult.invalid
     this.startText = this.text
     return this.createResult
   }
 
   async rebuildPageContainer(page: PageInput) {
-    this.setPage(page)
+    if (!this.setPage(page)) return false
     this.rebuilds += 1
     return true
+  }
+
+  async updateImageRawData(update: { containerID?: number; containerName?: string; imageData?: unknown }) {
+    const image = this.images.find((candidate) => candidate.containerID === update.containerID)
+    if (!image) throw new Error(`no image container ${update.containerID} on the current page`)
+    expect(update.containerName).toBe(image.containerName)
+    this.imageSends += 1
+    if (this.imageResult !== ImageRawDataUpdateResult.success) return this.imageResult
+    this.drawn.set(image.containerID ?? 0, new TextDecoder().decode(Uint8Array.from(update.imageData as number[])))
+    return this.imageResult
+  }
+
+  /** The initials drawn in each avatar slot, top to bottom; '' for an empty slot. */
+  get avatars(): string[] {
+    return this.images.map((image) => this.drawn.get(image.containerID ?? 0) ?? '')
   }
 
   async textContainerUpgrade(upgrade: { containerID?: number; containerName?: string; content?: string; textColor?: number }) {
@@ -211,10 +243,13 @@ const ringDoubleClick: EvenHubEvent = {
   }),
 }
 
-function setup(gateway: GatewayClient = fakeGateway()) {
+/** Stands in for the canvas: the "image" is just the initials as bytes. */
+const fakeAvatar = async (text: string) => new TextEncoder().encode(text)
+
+function setup(gateway: GatewayClient = fakeGateway(), renderAvatar: typeof fakeAvatar | null = fakeAvatar) {
   const bridge = new FakeBridge()
   const logs: string[] = []
-  const app = createApp({ bridge, gateway, gatewayUrl: 'https://gw.example', log: (line) => logs.push(line) })
+  const app = createApp({ bridge, gateway, gatewayUrl: 'https://gw.example', log: (line) => logs.push(line), renderAvatar: renderAvatar ?? undefined })
   return { bridge, app, logs }
 }
 
@@ -817,5 +852,85 @@ describe('voice reply', () => {
     await app.idle()
 
     expect(bridge.text).toContain('Click = send')
+  })
+})
+
+describe('avatars', () => {
+  it('draws the initials of each chat next to its box, and nothing next to the links', async () => {
+    const { bridge, app } = setup()
+
+    await app.start()
+    await app.idle()
+
+    expect(bridge.avatars).toEqual(['AP', 'F', '', ''])
+  })
+
+  it('does not send images again when only the selection moves', async () => {
+    const { bridge, app } = setup()
+    await app.start()
+    await app.idle()
+    const sent = bridge.imageSends
+
+    bridge.emit(scrollDown)
+    await app.idle()
+
+    expect(bridge.imageSends).toBe(sent)
+  })
+
+  it('draws them again after coming back from a chat, where the page was replaced', async () => {
+    const { bridge, app } = await openChat(0)
+    expect(bridge.avatars).toEqual([])
+
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    expect(bridge.avatars).toEqual(['AP', 'F', '', ''])
+  })
+
+  it('clears a slot when its box stops showing a chat', async () => {
+    const { bridge, app } = setup(fakeGateway({ chats: [[ana, family], [ana]] }))
+    await app.start()
+    await app.idle()
+
+    bridge.emit(foregroundEnter)
+    await app.idle()
+
+    // The fake renderer returns no bytes for an empty slot.
+    expect(bridge.avatars).toEqual(['AP', '', '', ''])
+    expect(bridge.lines).toEqual(['Unread (1)', '> Ana Pop  09:36', 'Vii maine? (2)', '  [Unanswered]', '  [All chats]'])
+  })
+
+  it('falls back to boxes without avatars when the glasses refuse a page with images', async () => {
+    const { bridge, app, logs } = setup()
+    bridge.rejectImages = true
+
+    await app.start()
+    await app.idle()
+
+    expect(bridge.lines[0]).toBe('Unread (2)')
+    expect(bridge.imageSends).toBe(0)
+    expect(logs.join('\n')).toContain('avatars off')
+  })
+
+  it('keeps working when an image is not accepted', async () => {
+    const { bridge, app, logs } = setup()
+    bridge.imageResult = ImageRawDataUpdateResult.sendFailed
+
+    await app.start()
+    await app.idle()
+
+    expect(bridge.lines[0]).toBe('Unread (2)')
+    expect(logs.join('\n')).toContain('avatar not shown')
+  })
+
+  it('shows plain boxes when no avatar renderer is available', async () => {
+    const { bridge, app } = setup(fakeGateway(), null)
+
+    await app.start()
+    await app.idle()
+
+    expect(bridge.avatars).toEqual([])
+    expect(bridge.imageSends).toBe(0)
+    expect(bridge.lines[0]).toBe('Unread (2)')
   })
 })

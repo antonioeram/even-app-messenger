@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  AVATAR_SIZE,
+  avatarSlot,
   BUBBLE_WIDTH,
   chatPage,
   headUpdate,
@@ -27,13 +29,27 @@ type Box = {
 }
 
 /** The checks the Even app applies before a page reaches the glasses. */
-function expectValidPage(page: { containerTotalNum?: number; textObject?: Box[] }) {
+function expectValidPage(page: { containerTotalNum?: number; textObject?: Box[]; imageObject?: Box[] }) {
   const boxes = page.textObject ?? []
-  expect(page.containerTotalNum).toBe(boxes.length)
+  const images = page.imageObject ?? []
+  expect(page.containerTotalNum).toBe(boxes.length + images.length)
   expect(boxes.length).toBeLessThanOrEqual(8)
+  expect(images.length).toBeLessThanOrEqual(4)
   expect(boxes.filter((box) => box.isEventCapture === 1)).toHaveLength(1)
-  expect(new Set(boxes.map((box) => box.containerID)).size).toBe(boxes.length)
-  expect(new Set(boxes.map((box) => box.containerName)).size).toBe(boxes.length)
+  const all = [...boxes, ...images]
+  expect(new Set(all.map((box) => box.containerID)).size).toBe(all.length)
+  expect(new Set(all.map((box) => box.containerName)).size).toBe(all.length)
+  for (const image of images) {
+    expect((image.containerName ?? '').length).toBeLessThanOrEqual(16)
+    // Limits of an image container.
+    expect(image.width ?? 0).toBeGreaterThanOrEqual(20)
+    expect(image.height ?? 0).toBeGreaterThanOrEqual(20)
+    expect(image.width ?? 999).toBeLessThanOrEqual(288)
+    expect(image.height ?? 999).toBeLessThanOrEqual(144)
+    expect(image.xPosition ?? -1).toBeGreaterThanOrEqual(0)
+    expect((image.xPosition ?? 0) + (image.width ?? 0)).toBeLessThanOrEqual(SCREEN.width)
+    expect((image.yPosition ?? 0) + (image.height ?? 0)).toBeLessThanOrEqual(SCREEN.height)
+  }
   for (const box of boxes) {
     expect((box.containerName ?? '').length).toBeLessThanOrEqual(16)
     expect(box.xPosition ?? -1).toBeGreaterThanOrEqual(0)
@@ -46,7 +62,7 @@ function expectValidPage(page: { containerTotalNum?: number; textObject?: Box[] 
   return boxes
 }
 
-const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ text: `row ${i}`, selected: i === 1 }))
+const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ text: `row ${i}`, selected: i === 1, avatar: 'R' }))
 
 describe('inbox page', () => {
   it('has a header and one bordered box per row, stacked without overlap', () => {
@@ -57,10 +73,40 @@ describe('inbox page', () => {
     let bottom = (boxes[0]?.yPosition ?? 0) + (boxes[0]?.height ?? 0)
     for (const box of boxes.slice(1)) {
       expect(box.borderWidth).toBeGreaterThan(0)
-      expect(box.width).toBe(SCREEN.width)
       expect(box.yPosition ?? 0).toBeGreaterThanOrEqual(bottom)
       bottom = (box.yPosition ?? 0) + (box.height ?? 0)
     }
+  })
+
+  it('leaves a clear gap between boxes', () => {
+    const boxes = expectValidPage(inboxPage('Unread (3)', rows(INBOX_ROWS))).slice(1)
+    const gaps = boxes.slice(1).map((box, index) => (box.yPosition ?? 0) - ((boxes[index]?.yPosition ?? 0) + (boxes[index]?.height ?? 0)))
+    // Twice the 2 px of version 0.4.0, or more.
+    for (const gap of gaps) expect(gap).toBeGreaterThanOrEqual(4)
+  })
+
+  it('puts a round avatar slot to the left of each box, without overlap', () => {
+    const page = inboxPage('Unread (3)', rows(INBOX_ROWS))
+    expectValidPage(page)
+    const boxes = (page.textObject ?? []).slice(1)
+    const images = page.imageObject ?? []
+    expect(images).toHaveLength(INBOX_ROWS)
+    images.forEach((image, index) => {
+      const box = boxes[index]
+      expect(image.width).toBe(AVATAR_SIZE)
+      expect(image.height).toBe(AVATAR_SIZE)
+      expect((image.xPosition ?? 0) + AVATAR_SIZE).toBeLessThanOrEqual(box?.xPosition ?? 0)
+      expect(image.yPosition ?? 0).toBeGreaterThanOrEqual(box?.yPosition ?? 0)
+      expect((image.yPosition ?? 0) + AVATAR_SIZE).toBeLessThanOrEqual((box?.yPosition ?? 0) + (box?.height ?? 0))
+      expect(avatarSlot(index)).toEqual({ containerID: image.containerID, containerName: image.containerName })
+    })
+  })
+
+  it('can build the same page without avatars, with boxes across the whole width', () => {
+    const page = inboxPage('Unread (3)', rows(INBOX_ROWS), false)
+    const boxes = expectValidPage(page).slice(1)
+    expect(page.imageObject ?? []).toHaveLength(0)
+    for (const box of boxes) expect(box.width).toBe(SCREEN.width)
   })
 
   it('captures input in the header, whose short text makes every swipe an event', () => {
@@ -88,7 +134,7 @@ describe('inbox page', () => {
 
   it('updates one row or the header in place', () => {
     const [, first] = expectValidPage(inboxPage('Unread (3)', rows(INBOX_ROWS)))
-    const update = rowUpdate(0, { text: 'changed', selected: true })
+    const update = rowUpdate(0, { text: 'changed', selected: true, avatar: '' })
     expect(update.containerID).toBe(first?.containerID)
     expect(update.containerName).toBe(first?.containerName)
     expect(update.content).toBe('changed')

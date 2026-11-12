@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { Chat, Message } from './gateway'
 import { INBOX_ROWS } from './screen'
-import { BUBBLE_LINE_CHARS, chatBubbles, INBOX_LINE_CHARS, inboxRows, MAX_BUBBLES, noteRows, PAGE_LINE_BUDGET } from './views'
+import {
+  BUBBLE_LINE_CHARS,
+  chatBubbles,
+  INBOX_LINE_CHARS,
+  inboxRows,
+  initials,
+  MAX_BUBBLES,
+  noteRows,
+  PAGE_LINE_BUDGET,
+} from './views'
 
 const chat = (over: Partial<Chat> = {}): Chat => ({
   id: 'a@s.whatsapp.net',
@@ -53,10 +62,17 @@ describe('inboxRows', () => {
     expect(rows[0]?.text).toBe('> Chat 0  10:00\nhi')
   })
 
-  it('scrolls the window so the selected chat stays visible', () => {
-    const rows = inboxRows(chats(20), 12)
-    expect(rows).toHaveLength(INBOX_ROWS)
-    expect(rows.filter((row) => row.selected).map((row) => row.text)).toEqual(['> Chat 12  10:00\nhi'])
+  it('shows the list one screenful at a time, so the boxes change only when a page turns', () => {
+    const onPage = (cursor: number) => inboxRows(chats(20), cursor).map((row) => /Chat \d+/.exec(row.text)?.[0])
+    expect(onPage(12)).toEqual(['Chat 12', 'Chat 13', 'Chat 14', 'Chat 15'])
+    expect(onPage(13)).toEqual(onPage(12))
+    expect(onPage(16)).toEqual(['Chat 16', 'Chat 17', 'Chat 18', 'Chat 19'])
+    expect(inboxRows(chats(20), 13).filter((row) => row.selected).map((row) => row.text)).toEqual(['> Chat 13  10:00\nhi'])
+  })
+
+  it('gives each chat box the initials for its avatar, and none to link rows', () => {
+    const rows = inboxRows([chat({ name: 'Maria Ionescu' })], 0, ['[All chats]'])
+    expect(rows.map((row) => row.avatar)).toEqual(['MI', ''])
   })
 
   it('keeps a full window at the end of the list', () => {
@@ -68,6 +84,22 @@ describe('inboxRows', () => {
   it('adds selectable link rows after the chats', () => {
     const rows = inboxRows([chat()], 2, ['[Unanswered]', '[All chats]'])
     expect(texts(rows)).toEqual(['  Ana Pop  09:36\nVii maine?', '  [Unanswered]', '> [All chats]'])
+  })
+})
+
+describe('initials', () => {
+  it.each([
+    ['Maria Ionescu', 'MI'],
+    ['maria ionescu', 'MI'],
+    ['Ana Maria Popescu', 'AP'],
+    ['Family', 'F'],
+    ['  Dan  ', 'D'],
+    ['Dr. Popa', 'DP'],
+    ['+40722000002', '#'],
+    ['', '#'],
+    ['12345', '#'],
+  ])('%s -> %s', (name, expected) => {
+    expect(initials(name)).toBe(expected)
   })
 })
 
