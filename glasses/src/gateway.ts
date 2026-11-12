@@ -21,6 +21,8 @@ export interface Chat {
   clock: string
   /** Text of the newest message. */
   preview: string
+  /** True when the newest message is mine. */
+  lastFromMe: boolean
 }
 
 export interface Message {
@@ -59,7 +61,8 @@ export interface Counts {
 }
 
 export interface GatewayClient {
-  chats(filter?: ChatFilter): Promise<Chat[]>
+  /** One page of a chat list; offset skips the chats already loaded. */
+  chats(filter?: ChatFilter, offset?: number): Promise<Chat[]>
   counts(): Promise<Counts>
   messages(chatId: string): Promise<Conversation>
   /** Clears the gateway's unread counter; sends no read receipt to WhatsApp. */
@@ -69,8 +72,7 @@ export interface GatewayClient {
   send(chatId: string, text: string): Promise<void>
 }
 
-// A list on the glasses holds 20 items; one screen of text holds fewer
-// messages than this, so one page of each is enough for stage 1.
+// Chats are loaded a page at a time, as the selection moves down the list.
 const CHAT_LIMIT = 20
 const MESSAGE_LIMIT = 30
 const TRANSCRIBE_TIMEOUT_MS = 45_000
@@ -144,8 +146,9 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
   }
 
   return {
-    async chats(filter) {
-      const body = await getJson(`/chats?limit=${CHAT_LIMIT}${filter ? `&filter=${filter}` : ''}`)
+    async chats(filter, offset = 0) {
+      const query = `limit=${CHAT_LIMIT}${filter ? `&filter=${filter}` : ''}${offset > 0 ? `&offset=${offset}` : ''}`
+      const body = await getJson(`/chats?${query}`)
       if (!isRecord(body) || !Array.isArray(body.chats)) {
         throw new GatewayError('invalid', 'response has no chats list')
       }
@@ -208,6 +211,7 @@ function parseChat(raw: unknown): Chat {
     unread: typeof raw.unread === 'number' ? raw.unread : 0,
     clock: text(raw.clock),
     preview: text(raw.preview),
+    lastFromMe: raw.last_from_me === true,
   }
 }
 

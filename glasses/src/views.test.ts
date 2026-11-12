@@ -18,6 +18,7 @@ const chat = (over: Partial<Chat> = {}): Chat => ({
   unread: 0,
   clock: '09:36',
   preview: 'Vii maine?',
+  lastFromMe: false,
   ...over,
 })
 
@@ -38,6 +39,11 @@ describe('inboxRows', () => {
     const rows = inboxRows([chat(), chat({ id: 'b', name: 'Familia', preview: 'ok', clock: '11.11' })], 1)
     expect(texts(rows)).toEqual(['  Ana Pop  09:36\nVii maine?', '> Familia  11.11\nok'])
     expect(rows.map((row) => row.selected)).toEqual([false, true])
+  })
+
+  it('says so when the newest message is mine', () => {
+    const rows = inboxRows([chat({ lastFromMe: true, preview: 'Ajung in 10 minute' }), chat({ id: 'b' })], 1)
+    expect(texts(rows)).toEqual(['  Ana Pop  09:36\nMe: Ajung in 10 minute', '> Ana Pop  09:36\nVii maine?'])
   })
 
   it('marks unread chats with a star and their count', () => {

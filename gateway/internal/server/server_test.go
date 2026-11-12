@@ -214,6 +214,7 @@ type fakeStore struct {
 	gotLimit  int
 	gotBefore time.Time
 	gotFilter store.Filter
+	gotOffset int
 	readChat  string
 }
 
@@ -224,8 +225,8 @@ func (f *fakeStore) SetUnread(_ context.Context, chatID string, unread int) erro
 	return nil
 }
 
-func (f *fakeStore) Chats(_ context.Context, limit int, filter store.Filter) ([]store.Chat, error) {
-	f.gotLimit, f.gotFilter = limit, filter
+func (f *fakeStore) Chats(_ context.Context, limit, offset int, filter store.Filter) ([]store.Chat, error) {
+	f.gotLimit, f.gotOffset, f.gotFilter = limit, offset, filter
 	return f.chats, nil
 }
 
@@ -663,5 +664,34 @@ func TestCountsReportsTheSizeOfEachBox(t *testing.T) {
 	body := decode(t, rec)
 	if body["unread"] != float64(1) || body["unanswered"] != float64(12) || body["all"] != float64(437) {
 		t.Errorf("body = %v", body)
+	}
+}
+
+func TestChatsReportsWhoWroteTheNewestMessage(t *testing.T) {
+	st := &fakeStore{chats: []store.Chat{
+		{ID: "a@s.whatsapp.net", Name: "Ana", LastTime: fixedNow, Preview: "pong", LastFromMe: true},
+		{ID: "b@s.whatsapp.net", Name: "Dan", LastTime: fixedNow, Preview: "ping"},
+	}}
+	chats := decode(t, do(t, newStoreHandler(config.Config{}, st, nil), http.MethodGet, "/chats", nil))["chats"].([]any)
+	if chats[0].(map[string]any)["last_from_me"] != true || chats[1].(map[string]any)["last_from_me"] != false {
+		t.Errorf("last_from_me = %v, %v; want true, false", chats[0].(map[string]any)["last_from_me"], chats[1].(map[string]any)["last_from_me"])
+	}
+}
+
+func TestChatsOffsetIsPassedToTheStore(t *testing.T) {
+	st := sampleStore()
+	h := newStoreHandler(config.Config{}, st, nil)
+	do(t, h, http.MethodGet, "/chats?limit=20&offset=40", nil)
+	if st.gotOffset != 40 || st.gotLimit != 20 {
+		t.Errorf("offset=%d limit=%d, want 40 20", st.gotOffset, st.gotLimit)
+	}
+	do(t, h, http.MethodGet, "/chats", nil)
+	if st.gotOffset != 0 {
+		t.Errorf("default offset = %d, want 0", st.gotOffset)
+	}
+	for _, bad := range []string{"-1", "abc"} {
+		if rec := do(t, h, http.MethodGet, "/chats?offset="+bad, nil); rec.Code != http.StatusBadRequest {
+			t.Errorf("offset=%s: status = %d, want 400", bad, rec.Code)
+		}
 	}
 }

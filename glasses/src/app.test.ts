@@ -129,8 +129,8 @@ class FakeBridge implements GlassesBridge {
   }
 }
 
-const ana: Chat = { id: 'ana@s.whatsapp.net', name: 'Ana Pop', group: false, unread: 2, clock: '09:36', preview: 'Vii maine?' }
-const family: Chat = { id: '123@g.us', name: 'Familia', group: true, unread: 0, clock: '11.11', preview: 'ok' }
+const ana: Chat = { id: 'ana@s.whatsapp.net', name: 'Ana Pop', group: false, unread: 2, clock: '09:36', preview: 'Vii maine?', lastFromMe: false }
+const family: Chat = { id: '123@g.us', name: 'Familia', group: true, unread: 0, clock: '11.11', preview: 'ok', lastFromMe: false }
 
 const message = (text: string, over: Partial<Message> = {}): Message => ({
   id: text,
@@ -149,6 +149,8 @@ function fakeGateway(
     messages?: Step<Message[]>[]
     transcripts?: Step<Transcript>[]
     counts?: Step<Counts>
+    /** What each call for a further page returns, in order. */
+    more?: Chat[][]
     sends?: (GatewayError | undefined)[]
   } = {},
 ) {
@@ -163,7 +165,7 @@ function fakeGateway(
     async counts(): Promise<Counts> {
       gateway.countCalls += 1
       if (options.counts instanceof GatewayError) throw options.counts
-      return options.counts ?? { unread: 2, unanswered: 5, all: 9 }
+      return options.counts ?? { unread: gateway.lastUnread, unanswered: 5, all: 9 }
     },
     recordings: [] as Uint8Array[],
     sent: [] as { chatId: string; text: string }[],
@@ -183,11 +185,19 @@ function fakeGateway(
       if (step instanceof GatewayError) throw step
       gateway.sent.push({ chatId, text })
     },
-    async chats(filter?: 'unread' | 'unanswered'): Promise<Chat[]> {
+    /** Offsets of the calls that asked for a further page. */
+    offsets: [] as number[],
+    lastUnread: 0,
+    async chats(filter?: 'unread' | 'unanswered', offset = 0): Promise<Chat[]> {
+      if (offset > 0) {
+        gateway.offsets.push(offset)
+        return options.more?.[gateway.offsets.length - 1] ?? []
+      }
       gateway.filters.push(filter)
       const step = chatSteps[Math.min(gateway.chatCalls, chatSteps.length - 1)]
       gateway.chatCalls += 1
       if (step instanceof GatewayError) throw step
+      if (filter === 'unread') gateway.lastUnread = (step ?? []).length
       return step ?? []
     },
     async messages(chatId: string): Promise<Conversation> {
@@ -359,7 +369,7 @@ describe('inbox', () => {
     await app.idle()
 
     expect(gateway.filters).toEqual(['unread', undefined])
-    expect(bridge.lines).toEqual(['All chats (2)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Familia  11.11', 'ok'])
+    expect(bridge.lines).toEqual(['All chats (9)', '> Ana Pop  09:36', 'Vii maine? (2)', '  Familia  11.11', 'ok'])
   })
 
   it('goes back from all chats to the unread box on double click, without asking to exit', async () => {
@@ -569,7 +579,7 @@ describe('inside a chat', () => {
     bridge.emit(doubleClick)
     await app.idle()
 
-    expect(bridge.lines[0]).toBe('All chats (2)')
+    expect(bridge.lines[0]).toBe('All chats (9)')
   })
 })
 
@@ -638,7 +648,7 @@ describe('boxes', () => {
     bridge.emit(click)
     await app.idle()
     expect(gateway.filters).toEqual(['unread', 'unanswered'])
-    expect(bridge.lines[0]).toBe('Unanswered (2)')
+    expect(bridge.lines[0]).toBe('Unanswered (5)')
 
     bridge.emit(doubleClick)
     await app.idle()
@@ -844,6 +854,7 @@ describe('home links', () => {
 
     await app.start()
 
+    expect(bridge.lines[0]).toBe('Unread (2)')
     expect(bridge.lines.slice(-2)).toEqual(['  Unanswered (12)', '  All chats (437)'])
   })
 
@@ -853,9 +864,11 @@ describe('home links', () => {
     await app.start()
 
     expect(bridge.lines.slice(-2)).toEqual(['  Unanswered', '  All chats'])
+    // Without the counts, the title falls back to what was loaded.
+    expect(bridge.lines[0]).toBe('Unread (2)')
   })
 
-  it('asks for the counts only for the home box', async () => {
+  it('reads the counts again for each box it opens', async () => {
     const gateway = fakeGateway()
     const { bridge, app } = setup(gateway)
     await app.start()
@@ -863,8 +876,8 @@ describe('home links', () => {
     bridge.emit(click)
     await app.idle()
 
-    expect(bridge.lines[0]).toBe('All chats (2)')
-    expect(gateway.countCalls).toBe(1)
+    expect(bridge.lines[0]).toBe('All chats (9)')
+    expect(gateway.countCalls).toBe(2)
   })
 })
 
@@ -892,7 +905,7 @@ describe('boxes on screen', () => {
   })
 
   it('says so when another box has no chats', async () => {
-    const { bridge, app } = setup(fakeGateway({ chats: [[ana], []] }))
+    const { bridge, app } = setup(fakeGateway({ chats: [[ana], []], counts: { unread: 1, unanswered: 0, all: 1 } }))
     await app.start()
     bridge.emit(scrollDown)
     bridge.emit(click)
@@ -901,5 +914,83 @@ describe('boxes on screen', () => {
     expect(bridge.lines[0]).toBe('Unanswered (0)')
     expect(bridge.text).toContain('No chats here')
     expect(boxCount(bridge)).toBe(1)
+  })
+})
+
+describe('list totals and paging', () => {
+  const chat = (i: number): Chat => ({ id: `c${i}@s.whatsapp.net`, name: `Chat ${i}`, group: false, unread: 0, clock: '10:00', preview: 'hi', lastFromMe: false })
+  const page = (from: number, count: number) => Array.from({ length: count }, (_, i) => chat(from + i))
+
+  /** Opens the All chats box of a gateway that holds `all` chats and serves them in pages. */
+  async function openAll(all: number, more: Chat[][]) {
+    const gateway = fakeGateway({ chats: [[], page(0, Math.min(all, 20))], counts: { unread: 0, unanswered: 0, all }, more })
+    const context = setup(gateway)
+    await context.app.start()
+    context.bridge.emit(scrollDown)
+    context.bridge.emit(click)
+    await context.app.idle()
+    return { ...context, gateway }
+  }
+
+  it('shows the real total in the title, not the number of chats loaded so far', async () => {
+    const { bridge } = await openAll(437, [])
+
+    expect(bridge.lines[0]).toBe('All chats (437)')
+  })
+
+  it('loads the next page when the selection reaches the last loaded chat', async () => {
+    const { bridge, app, gateway } = await openAll(45, [page(20, 20), page(40, 5)])
+
+    for (let i = 0; i < 19; i += 1) bridge.emit(scrollDown)
+    await app.idle()
+    expect(gateway.offsets).toEqual([20])
+
+    bridge.emit(scrollDown)
+    await app.idle()
+    expect(bridge.lines).toContain('> Chat 20  10:00')
+  })
+
+  it('reaches the last chat of a long list and then stops asking', async () => {
+    const { bridge, app, gateway } = await openAll(45, [page(20, 20), page(40, 5)])
+
+    for (let i = 0; i < 60; i += 1) {
+      bridge.emit(scrollDown)
+      await app.idle()
+    }
+
+    expect(bridge.lines).toContain('> Chat 44  10:00')
+    expect(gateway.offsets).toEqual([20, 40])
+  })
+
+  it('does not ask for more when everything is loaded', async () => {
+    const { bridge, app, gateway } = await openAll(3, [])
+
+    for (let i = 0; i < 5; i += 1) bridge.emit(scrollDown)
+    await app.idle()
+
+    expect(gateway.offsets).toEqual([])
+  })
+
+  it('does not list a chat twice when it moved between pages', async () => {
+    const { bridge, app } = await openAll(22, [[chat(19), chat(20), chat(21)]])
+
+    for (let i = 0; i < 30; i += 1) {
+      bridge.emit(scrollDown)
+      await app.idle()
+    }
+
+    // 22 chats: the last page holds chats 20 and 21 only.
+    expect(bridge.lines).toEqual(['All chats (22)', '  Chat 20  10:00', 'hi', '> Chat 21  10:00', 'hi'])
+  })
+
+  it('stops asking when the gateway has no more chats than it promised', async () => {
+    const { bridge, app, gateway } = await openAll(50, [[]])
+
+    for (let i = 0; i < 40; i += 1) {
+      bridge.emit(scrollDown)
+      await app.idle()
+    }
+
+    expect(gateway.offsets).toEqual([20])
   })
 })

@@ -19,7 +19,7 @@ export const PAGE_LINE_BUDGET = 7
 /**
  * The boxes of a chat list: a window of INBOX_ROWS rows around the cursor.
  * A chat box has marker, name and time on its first line and the newest text
- * on the second. links are selectable rows after the chats (indexes
+ * on the second, prefixed with "Me:" when I wrote it. links are selectable rows after the chats (indexes
  * chats.length and up).
  */
 export function inboxRows(chats: readonly Chat[], cursor: number, links: readonly string[] = []): Row[] {
@@ -38,7 +38,9 @@ export function inboxRows(chats: readonly Chat[], cursor: number, links: readonl
     const marker = selected ? '>' : chat.unread > 0 ? '*' : ' '
     const name = fitText(chat.name, INBOX_LINE_CHARS - 4 - chat.clock.length)
     const count = chat.unread > 0 ? ` (${chat.unread})` : ''
-    const preview = fitText(oneLine(chat.preview), INBOX_LINE_CHARS - count.length) + count
+    // The second line says who wrote the newest message when it was me.
+    const author = chat.lastFromMe ? 'Me: ' : ''
+    const preview = fitText(author + oneLine(chat.preview), INBOX_LINE_CHARS - count.length) + count
     rows.push({ text: `${marker} ${name}  ${chat.clock}${preview ? `\n${preview}` : ''}`, selected })
   }
   return rows

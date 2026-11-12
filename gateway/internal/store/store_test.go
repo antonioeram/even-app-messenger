@@ -28,7 +28,7 @@ func TestSaveMessageCreatesChatWithPreview(t *testing.T) {
 	if _, err := s.SaveMessage(ctx, msg("ana@s.whatsapp.net", "m1", 0, "Salut")); err != nil {
 		t.Fatal(err)
 	}
-	chats, err := s.Chats(ctx, 10, All)
+	chats, err := s.Chats(ctx, 10, 0, All)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestChatsOrderUnreadFirstThenNewest(t *testing.T) {
 	if err := s.SetUnread(ctx, "old-unread", 2); err != nil {
 		t.Fatal(err)
 	}
-	chats, _ := s.Chats(ctx, 10, All)
+	chats, _ := s.Chats(ctx, 10, 0, All)
 	got := []string{chats[0].ID, chats[1].ID, chats[2].ID}
 	want := []string{"old-unread", "newest-read", "mid-read"}
 	for i := range want {
@@ -75,7 +75,7 @@ func TestChatsHonoursLimit(t *testing.T) {
 	s, ctx := open(t), context.Background()
 	s.SaveMessage(ctx, msg("a", "m1", 0, "a"))
 	s.SaveMessage(ctx, msg("b", "m2", 1, "b"))
-	chats, _ := s.Chats(ctx, 1, All)
+	chats, _ := s.Chats(ctx, 1, 0, All)
 	if len(chats) != 1 || chats[0].ID != "b" {
 		t.Errorf("chats = %+v", chats)
 	}
@@ -151,7 +151,7 @@ func TestOlderMessageDoesNotReplacePreview(t *testing.T) {
 	s, ctx := open(t), context.Background()
 	s.SaveMessage(ctx, msg("a", "new", 10, "new"))
 	s.SaveMessage(ctx, msg("a", "old", 0, "old"))
-	chats, _ := s.Chats(ctx, 1, All)
+	chats, _ := s.Chats(ctx, 1, 0, All)
 	if chats[0].Preview != "new" || !chats[0].LastTime.Equal(t0.Add(10*time.Minute)) {
 		t.Errorf("chat = %+v", chats[0])
 	}
@@ -198,7 +198,7 @@ func TestUnansweredListsDirectChatsWhoseNewestMessageIsIncoming(t *testing.T) {
 	s.UpsertChat(ctx, Chat{ID: "group", Name: "Familia", Group: true})
 	s.SaveMessage(ctx, msg("group", "m4", 3, "hello all"))
 
-	chats, err := s.Chats(ctx, 10, Unanswered)
+	chats, err := s.Chats(ctx, 10, 0, Unanswered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestOlderOwnMessageDoesNotMarkChatAsAnswered(t *testing.T) {
 	old := msg("a", "old", 0, "mine")
 	old.FromMe = true
 	s.SaveMessage(ctx, old) // history arrives after the live message
-	chats, _ := s.Chats(ctx, 10, Unanswered)
+	chats, _ := s.Chats(ctx, 10, 0, Unanswered)
 	if len(chats) != 1 {
 		t.Errorf("unanswered = %+v, want the chat", chats)
 	}
@@ -241,7 +241,7 @@ func TestOpenUpgradesADatabaseFromBeforeTheAnsweredFlag(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer s.Close()
-	chats, _ := s.Chats(ctx, 10, Unanswered)
+	chats, _ := s.Chats(ctx, 10, 0, Unanswered)
 	if len(chats) != 1 || chats[0].ID != "waiting" {
 		t.Errorf("unanswered after upgrade = %+v", chats)
 	}
@@ -252,7 +252,7 @@ func TestUnreadListsOnlyChatsWithUnreadMessages(t *testing.T) {
 	s.SaveMessage(ctx, msg("read", "m1", 0, "old"))
 	s.SaveMessage(ctx, msg("unread", "m2", 1, "new"))
 	s.AddUnread(ctx, "unread", 1)
-	chats, _ := s.Chats(ctx, 10, Unread)
+	chats, _ := s.Chats(ctx, 10, 0, Unread)
 	if len(chats) != 1 || chats[0].ID != "unread" {
 		t.Errorf("unread = %+v", chats)
 	}
@@ -264,7 +264,7 @@ func TestUnansweredLeavesOutUnreadChats(t *testing.T) {
 	s.SaveMessage(ctx, msg("read-waiting", "m1", 0, "ping"))
 	s.SaveMessage(ctx, msg("unread", "m2", 1, "ping"))
 	s.AddUnread(ctx, "unread", 1)
-	chats, _ := s.Chats(ctx, 10, Unanswered)
+	chats, _ := s.Chats(ctx, 10, 0, Unanswered)
 	if len(chats) != 1 || chats[0].ID != "read-waiting" {
 		t.Errorf("unanswered = %+v", chats)
 	}
@@ -335,5 +335,24 @@ func TestCountsPerBox(t *testing.T) {
 	}
 	if want := (Counts{Unread: 1, Unanswered: 1, All: 3}); got != want {
 		t.Errorf("counts = %+v, want %+v", got, want)
+	}
+}
+
+func TestChatsOffsetReturnsTheNextPage(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	for i, id := range []string{"a", "b", "c", "d", "e"} {
+		s.SaveMessage(ctx, msg(id, "m", i, id))
+	}
+	first, _ := s.Chats(ctx, 2, 0, All)
+	second, _ := s.Chats(ctx, 2, 2, All)
+	last, _ := s.Chats(ctx, 2, 4, All)
+	ids := func(chats []Chat) (out []string) {
+		for _, c := range chats {
+			out = append(out, c.ID)
+		}
+		return
+	}
+	if got := append(append(ids(first), ids(second)...), ids(last)...); len(got) != 5 || got[0] != "e" || got[2] != "c" || got[4] != "a" {
+		t.Errorf("pages = %v, want e d | c b | a", got)
 	}
 }

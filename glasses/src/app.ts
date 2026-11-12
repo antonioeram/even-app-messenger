@@ -115,7 +115,8 @@ type Reply =
 
 type Screen =
   /** A chat list is shown; cursor is the selected row (chats.length and up = the home links). */
-  | { name: 'inbox'; box: Box; chats: Chat[]; cursor: number; links: string[] }
+  /** total is the number of chats in the box; chats holds the ones loaded so far. */
+  | { name: 'inbox'; box: Box; chats: Chat[]; total: number; cursor: number; links: string[] }
   /** A message is shown instead of the list: loading or failed. */
   | { name: 'inboxText'; box: Box }
   /** pages is empty while the chat is loading or after a failure. */
@@ -207,24 +208,47 @@ export function createApp(options: AppOptions): App {
     }
   }
 
-  function drawInbox(box: Box, chats: Chat[], cursor: number, links: readonly string[]): Promise<void> {
-    const rows = inboxRows(chats, cursor, links)
-    return showInbox(`${BOX_TITLE[box]} (${chats.length})`, rows.length > 0 ? rows : noteRows('No chats here\nDouble click = back'))
+  function drawInbox(list: Extract<Screen, { name: 'inbox' }>): Promise<void> {
+    const rows = inboxRows(list.chats, list.cursor, list.links)
+    const title = `${BOX_TITLE[list.box]} (${list.total})`
+    return showInbox(title, rows.length > 0 ? rows : noteRows('No chats here\nDouble click = back'))
+  }
+
+  /** Loads the next page of the open list, when the selection reached the last loaded chat. */
+  function loadMore(): void {
+    if (screen.name !== 'inbox' || loading || screen.chats.length >= screen.total) return
+    const box = screen.box
+    void load(async () => {
+      if (screen.name !== 'inbox' || screen.box !== box) return
+      try {
+        const page = await gateway.chats(BOX_FILTER[box], screen.chats.length)
+        if (screen.name !== 'inbox' || screen.box !== box) return
+        // A chat can move between pages while the list is read; it is listed once.
+        const known = new Set(screen.chats.map((chat) => chat.id))
+        const fresh = page.filter((chat) => !known.has(chat.id))
+        // Nothing new means the list ended earlier than the count said.
+        const chats = [...screen.chats, ...fresh]
+        screen = { ...screen, chats, total: fresh.length > 0 ? Math.max(screen.total, chats.length) : chats.length }
+        log(`${box}: ${chats.length} of ${screen.total} chats loaded`)
+        await drawInbox(screen)
+      } catch (error) {
+        log(`loading more chats failed: ${describeError(error).detail}`)
+      }
+    })
   }
 
   function openInbox(box: Box): Promise<void> {
     return load(async () => {
       try {
-        // The home box also shows how many chats the other boxes hold; a
-        // gateway without that answer leaves the numbers out.
-        const [chats, counts] = await Promise.all([
-          gateway.chats(BOX_FILTER[box]),
-          box === HOME ? gateway.counts().catch(() => null) : null,
-        ])
+        // The counts give the real size of each box: the title of this one
+        // and, on the home box, the numbers on the links. A gateway without
+        // that answer leaves the numbers out and the title counts what is loaded.
+        const [chats, counts] = await Promise.all([gateway.chats(BOX_FILTER[box]), gateway.counts().catch(() => null)])
         const links = box === HOME ? homeLinks(counts) : []
+        const total = Math.max(chats.length, counts ? counts[BOX_COUNT[box]] : 0)
         const cursor = Math.max(0, chats.findIndex((chat) => chat.id === selectedId))
-        screen = { name: 'inbox', box, chats, cursor, links }
-        await drawInbox(box, chats, cursor, links)
+        screen = { name: 'inbox', box, chats, total, cursor, links }
+        await drawInbox(screen)
         log(`${box}: ${chats.length} chats`)
       } catch (error) {
         screen = { name: 'inboxText', box }
@@ -265,7 +289,8 @@ export function createApp(options: AppOptions): App {
       if (cursor === screen.cursor) return
       screen = { ...screen, cursor }
       selectedId = screen.chats[cursor]?.id ?? null
-      void track(drawInbox(screen.box, screen.chats, cursor, screen.links))
+      void track(drawInbox(screen))
+      if (cursor >= screen.chats.length - 1) loadMore()
     } else if (screen.name === 'chat' && !screen.reply) {
       const page = Math.max(0, Math.min(screen.pages.length - 1, screen.page + step))
       if (page === screen.page) return

@@ -203,7 +203,8 @@ const chatColumns = `id, name, is_group, unread, last_ts, preview, last_from_me`
 
 // Chats lists the chats filter selects, among those that have messages:
 // unread ones first, then newest first.
-func (s *Store) Chats(ctx context.Context, limit int, filter Filter) ([]Chat, error) {
+// offset skips that many chats, for reading the list page by page.
+func (s *Store) Chats(ctx context.Context, limit, offset int, filter Filter) ([]Chat, error) {
 	where := `last_ts > 0`
 	switch filter {
 	case Unread:
@@ -213,7 +214,7 @@ func (s *Store) Chats(ctx context.Context, limit int, filter Filter) ([]Chat, er
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+chatColumns+` FROM chats WHERE `+where+`
-		ORDER BY (unread > 0) DESC, last_ts DESC LIMIT ?`, limit)
+		ORDER BY (unread > 0) DESC, last_ts DESC, id LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}

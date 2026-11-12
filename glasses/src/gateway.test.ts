@@ -119,7 +119,7 @@ describe('gateway client', () => {
 
     const chats = await client.chats()
 
-    expect(chats).toEqual([{ id: 'a@s.whatsapp.net', name: 'Ana', group: false, unread: 2, clock: '09:36', preview: 'Vii?' }])
+    expect(chats).toEqual([{ id: 'a@s.whatsapp.net', name: 'Ana', group: false, unread: 2, clock: '09:36', preview: 'Vii?', lastFromMe: false }])
     expect(calls[0]?.url).toBe('https://gw.example/chats?limit=20')
     expect(new Headers(calls[0]?.init?.headers).get('Authorization')).toBe('Bearer tok')
   })
@@ -222,5 +222,21 @@ describe('gateway client', () => {
     const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
 
     expect((await failure(client.counts())).kind).toBe('invalid')
+  })
+
+  it('reads who wrote the newest message of a chat', async () => {
+    const { fetchFn } = fakeFetch(() => json({ chats: [{ id: 'a', name: 'Ana', last_from_me: true }] }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    expect((await client.chats())[0]?.lastFromMe).toBe(true)
+  })
+
+  it('asks for a further page of chats with an offset', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ chats: [] }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    await client.chats('unanswered', 40)
+
+    expect(calls[0]?.url).toBe('https://gw.example/chats?limit=20&filter=unanswered&offset=40')
   })
 })

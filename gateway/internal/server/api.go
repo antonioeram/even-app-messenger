@@ -20,7 +20,7 @@ import (
 
 // ChatStore is the part of the message store the API reads.
 type ChatStore interface {
-	Chats(ctx context.Context, limit int, filter store.Filter) ([]store.Chat, error)
+	Chats(ctx context.Context, limit, offset int, filter store.Filter) ([]store.Chat, error)
 	SetUnread(ctx context.Context, chatID string, unread int) error
 	Counts(ctx context.Context) (store.Counts, error)
 	Chat(ctx context.Context, id string) (store.Chat, bool, error)
@@ -62,6 +62,8 @@ type chatJSON struct {
 	Time    string `json:"time"`
 	Clock   string `json:"clock"`
 	Preview string `json:"preview"`
+	// LastFromMe tells whether the newest message, shown in Preview, is mine.
+	LastFromMe bool `json:"last_from_me"`
 }
 
 type messageJSON struct {
@@ -106,7 +108,16 @@ func (a *api) chats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "filter must be unread, unanswered or absent")
 		return
 	}
-	chats, err := a.store.Chats(r.Context(), limit, filter)
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, "offset must be zero or a positive number")
+			return
+		}
+		offset = parsed
+	}
+	chats, err := a.store.Chats(r.Context(), limit, offset, filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read chats")
 		return
@@ -314,7 +325,7 @@ func (a *api) chatJSON(c store.Chat) chatJSON {
 	if name == "" {
 		name = nameFromID(c.ID)
 	}
-	out := chatJSON{ID: c.ID, Name: name, Group: c.Group, Unread: c.Unread, Preview: displayText(c.Preview)}
+	out := chatJSON{ID: c.ID, Name: name, Group: c.Group, Unread: c.Unread, Preview: displayText(c.Preview), LastFromMe: c.LastFromMe}
 	if !c.LastTime.IsZero() {
 		out.Time = c.LastTime.UTC().Format(time.RFC3339)
 		out.Clock = a.clock(c.LastTime)
