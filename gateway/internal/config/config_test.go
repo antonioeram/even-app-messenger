@@ -78,3 +78,19 @@ func TestLoadDataDirAndWhatsApp(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadSpeechToText(t *testing.T) {
+	cfg, err := Load(env(map[string]string{"GATEWAY_STT_URL": "http://10.0.10.42:8770/stt"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.STTURL != "http://10.0.10.42:8770/stt" || !reflect.DeepEqual(cfg.STTLanguages, []string{"ro", "en"}) {
+		t.Errorf("STTURL=%q STTLanguages=%v", cfg.STTURL, cfg.STTLanguages)
+	}
+	if cfg, _ := Load(env(nil)); cfg.STTURL != "" {
+		t.Errorf("default STTURL = %q, want empty", cfg.STTURL)
+	}
+	if _, err := Load(env(map[string]string{"GATEWAY_STT_URL": "10.0.10.42:8770"})); err == nil {
+		t.Error("a URL without scheme was accepted")
+	}
+}

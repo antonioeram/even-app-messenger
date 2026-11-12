@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
@@ -25,6 +26,11 @@ type Options struct {
 	Link func() LinkStatus
 	// Pair asks for fresh WhatsApp pairing codes after the first ones expired.
 	Pair func()
+	// Sender delivers a reply; nil answers 503.
+	Sender Sender
+	// Transcribe turns a recording (16 kHz, 16 bit, mono PCM) into text and
+	// its language; nil answers 503.
+	Transcribe func(ctx context.Context, pcm []byte) (text, lang string, err error)
 	// Location is the time zone of the clock strings; nil means time.Local.
 	Location *time.Location
 }
@@ -41,7 +47,10 @@ func New(cfg config.Config, opts Options) http.Handler {
 		opts.Location = time.Local
 	}
 	auth := requireToken(cfg.Token)
-	a := &api{store: opts.Store, link: opts.Link, pair: opts.Pair, now: opts.Now, loc: opts.Location}
+	a := &api{
+		store: opts.Store, link: opts.Link, pair: opts.Pair, sender: opts.Sender, transcribe: opts.Transcribe,
+		now: opts.Now, loc: opts.Location, log: opts.Logger,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +66,9 @@ func New(cfg config.Config, opts Options) http.Handler {
 
 	mux.Handle("GET /chats", auth(http.HandlerFunc(a.chats)))
 	mux.Handle("GET /chats/{id}/messages", auth(http.HandlerFunc(a.messages)))
+	mux.Handle("POST /chats/{id}/read", auth(http.HandlerFunc(a.markRead)))
+	mux.Handle("POST /chats/{id}/send", auth(http.HandlerFunc(a.send)))
+	mux.Handle("POST /transcribe", auth(http.HandlerFunc(a.transcribeAudio)))
 	mux.HandleFunc("GET /admin", a.adminPage)
 	mux.Handle("GET /admin/status", auth(http.HandlerFunc(a.adminStatus)))
 	mux.Handle("POST /admin/pair", auth(http.HandlerFunc(a.adminPair)))

@@ -162,4 +162,50 @@ describe('gateway client', () => {
 
     expect(calls[0]?.url).toBe('https://gw.example/chats?limit=20&filter=unanswered')
   })
+
+  it('marks a chat read with a POST', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ status: 'read' }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', token: 'tok', fetchFn })
+
+    await client.markRead('123@g.us')
+
+    expect(calls[0]?.url).toBe('https://gw.example/chats/123%40g.us/read')
+    expect(calls[0]?.init?.method).toBe('POST')
+    expect(new Headers(calls[0]?.init?.headers).get('Authorization')).toBe('Bearer tok')
+  })
+
+  it('uploads a recording as raw bytes and returns both texts', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ text: 'Ajung în zece minute', display: 'Ajung in zece minute', lang: 'ro' }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+    const pcm = new Uint8Array([1, 2, 3, 4])
+
+    const transcript = await client.transcribe(pcm)
+
+    expect(transcript).toEqual({ text: 'Ajung în zece minute', display: 'Ajung in zece minute', lang: 'ro' })
+    expect(calls[0]?.url).toBe('https://gw.example/transcribe')
+    expect(calls[0]?.init?.method).toBe('POST')
+    expect(new Headers(calls[0]?.init?.headers).get('Content-Type')).toBe('application/octet-stream')
+    expect(calls[0]?.init?.body).toBe(pcm)
+  })
+
+  it('sends a reply as JSON, keeping the text exactly', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ status: 'sent' }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    await client.send('ana@s.whatsapp.net', 'Ajung în zece minute')
+
+    expect(calls[0]?.url).toBe('https://gw.example/chats/ana%40s.whatsapp.net/send')
+    expect(calls[0]?.init?.method).toBe('POST')
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ text: 'Ajung în zece minute' })
+  })
+
+  it('reports a failed send with the reason from the gateway', async () => {
+    const { fetchFn } = fakeFetch(() => json({ error: 'message was not sent: WhatsApp is not connected' }, 502))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    const error = await failure(client.send('ana@s.whatsapp.net', 'x'))
+
+    expect(error.kind).toBe('http')
+    expect(error.message).toContain('WhatsApp is not connected')
+  })
 })

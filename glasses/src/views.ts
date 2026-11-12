@@ -21,16 +21,16 @@ export const CHAT_LINE_CHARS = 48
 
 /**
  * A chat list: a titled header, then a window of rows around the cursor.
- * Each row is time, name and newest text. extraRow, when given, is a last
- * selectable row (index chats.length).
+ * Each row is time, name and newest text. extraRows are selectable rows after
+ * the chats (indexes chats.length and up).
  */
-export function inboxText(title: string, chats: readonly Chat[], cursor: number, extraRow?: string): string {
+export function inboxText(title: string, chats: readonly Chat[], cursor: number, extraRows: readonly string[] = []): string {
   const rows = chats.map((chat) => {
     const unread = chat.unread > 0 ? `(${chat.unread}) ` : ''
     const preview = oneLine(chat.preview)
     return `${chat.clock} ${unread}${chat.name}${preview ? `: ${preview}` : ''}`
   })
-  if (extraRow) rows.push(extraRow)
+  rows.push(...extraRows)
   const first = Math.max(0, Math.min(cursor - Math.floor(INBOX_ROWS / 2), rows.length - INBOX_ROWS))
   const visible = rows
     .slice(first, first + INBOX_ROWS)

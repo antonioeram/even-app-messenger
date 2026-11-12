@@ -32,14 +32,30 @@ type Chat struct {
 type Message struct {
 	ChatID string
 	ID     string
-	// Sender is the display name of the author.
+	// Sender is the display name of the author. When read back, it is the
+	// current name of SenderID if one is known.
 	Sender string
-	FromMe bool
-	Time   time.Time
-	Text   string
+	// SenderID is the address of the author; empty for my own messages.
+	SenderID string
+	FromMe   bool
+	Time     time.Time
+	Text     string
 	// Kind is "text" or the media type the text stands in for.
 	Kind string
 }
+
+// Filter selects which chats a list shows.
+type Filter int
+
+const (
+	// All lists every chat that has messages.
+	All Filter = iota
+	// Unread lists chats with unread messages.
+	Unread
+	// Unanswered lists direct chats that are read, but whose newest message
+	// is not mine: the ones waiting for a reply.
+	Unanswered
+)
 
 // Store is a handle on the message database.
 type Store struct {
@@ -64,6 +80,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	ts      INTEGER NOT NULL,
 	text    TEXT NOT NULL DEFAULT '',
 	kind    TEXT NOT NULL DEFAULT '',
+	sender_id TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (chat_id, id)
 );
 CREATE INDEX IF NOT EXISTS messages_by_time ON messages (chat_id, ts);
@@ -92,19 +109,35 @@ func Open(ctx context.Context, path string) (*Store, error) {
 
 // upgrade adds what databases created by earlier versions lack.
 func upgrade(ctx context.Context, db *sql.DB) error {
-	var has int
-	err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pragma_table_info('chats') WHERE name = 'last_from_me'`).Scan(&has)
-	if err != nil || has > 0 {
-		return err
+	steps := []struct{ table, column, sql string }{
+		// 0.1.0 did not record who wrote the newest message; derive it once.
+		{"chats", "last_from_me", `
+			ALTER TABLE chats ADD COLUMN last_from_me INTEGER NOT NULL DEFAULT 0;
+			UPDATE chats SET last_from_me = COALESCE((
+				SELECT m.from_me FROM messages m WHERE m.chat_id = chats.id
+				ORDER BY m.ts DESC, m.id DESC LIMIT 1), 0);`},
+		// Up to 0.2.0 only a display name was stored. Where that name is a
+		// phone number, it gives the address back.
+		{"messages", "sender_id", `
+			ALTER TABLE messages ADD COLUMN sender_id TEXT NOT NULL DEFAULT '';
+			UPDATE messages SET sender_id = substr(sender, 2) || '@s.whatsapp.net'
+			WHERE sender GLOB '+[0-9]*' AND substr(sender, 2) NOT GLOB '*[^0-9]*';`},
 	}
-	// 0.1.0 did not record who wrote the newest message; derive it once.
-	_, err = db.ExecContext(ctx, `
-		ALTER TABLE chats ADD COLUMN last_from_me INTEGER NOT NULL DEFAULT 0;
-		UPDATE chats SET last_from_me = COALESCE((
-			SELECT m.from_me FROM messages m WHERE m.chat_id = chats.id
-			ORDER BY m.ts DESC, m.id DESC LIMIT 1), 0);`)
-	return err
+	for _, step := range steps {
+		var has int
+		err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, step.table, step.column).Scan(&has)
+		if err != nil {
+			return err
+		}
+		if has > 0 {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, step.sql); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Close releases the database.
@@ -133,9 +166,9 @@ func (s *Store) SaveMessage(ctx context.Context, m Message) (bool, error) {
 
 	ts := m.Time.UnixMilli()
 	res, err := tx.ExecContext(ctx, `
-		INSERT OR IGNORE INTO messages (chat_id, id, sender, from_me, ts, text, kind)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		m.ChatID, m.ID, m.Sender, boolInt(m.FromMe), ts, m.Text, m.Kind)
+		INSERT OR IGNORE INTO messages (chat_id, id, sender, from_me, ts, text, kind, sender_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ChatID, m.ID, m.Sender, boolInt(m.FromMe), ts, m.Text, m.Kind, m.SenderID)
 	if err != nil {
 		return false, err
 	}
@@ -168,13 +201,15 @@ func (s *Store) AddUnread(ctx context.Context, chatID string, delta int) error {
 
 const chatColumns = `id, name, is_group, unread, last_ts, preview, last_from_me`
 
-// Chats lists chats that have messages: unread ones first, then newest first.
-// With unanswered it lists only direct chats whose newest message is not
-// mine, that is, the ones waiting for a reply.
-func (s *Store) Chats(ctx context.Context, limit int, unanswered bool) ([]Chat, error) {
+// Chats lists the chats filter selects, among those that have messages:
+// unread ones first, then newest first.
+func (s *Store) Chats(ctx context.Context, limit int, filter Filter) ([]Chat, error) {
 	where := `last_ts > 0`
-	if unanswered {
-		where += ` AND last_from_me = 0 AND is_group = 0`
+	switch filter {
+	case Unread:
+		where += ` AND unread > 0`
+	case Unanswered:
+		where += ` AND unread = 0 AND last_from_me = 0 AND is_group = 0`
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+chatColumns+` FROM chats WHERE `+where+`
@@ -211,9 +246,11 @@ func (s *Store) Messages(ctx context.Context, chatID string, limit int, before t
 		cutoff = before.UnixMilli()
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT chat_id, id, sender, from_me, ts, text, kind FROM (
+		SELECT m.chat_id, m.id, COALESCE(NULLIF(c.name, ''), m.sender), m.from_me, m.ts, m.text, m.kind, m.sender_id
+		FROM (
 			SELECT * FROM messages WHERE chat_id = ? AND ts < ? ORDER BY ts DESC, id DESC LIMIT ?
-		) ORDER BY ts ASC, id ASC`, chatID, cutoff, limit)
+		) m LEFT JOIN chats c ON m.sender_id != '' AND c.id = m.sender_id
+		ORDER BY m.ts ASC, m.id ASC`, chatID, cutoff, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +260,7 @@ func (s *Store) Messages(ctx context.Context, chatID string, limit int, before t
 		var m Message
 		var fromMe int
 		var ts int64
-		if err := rows.Scan(&m.ChatID, &m.ID, &m.Sender, &fromMe, &ts, &m.Text, &m.Kind); err != nil {
+		if err := rows.Scan(&m.ChatID, &m.ID, &m.Sender, &fromMe, &ts, &m.Text, &m.Kind, &m.SenderID); err != nil {
 			return nil, err
 		}
 		m.FromMe = fromMe != 0

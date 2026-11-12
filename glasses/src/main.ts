@@ -45,6 +45,15 @@ const gateway: GatewayClient = gatewayUrl
       async messages() {
         throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
       },
+      async markRead() {
+        throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
+      },
+      async transcribe() {
+        throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
+      },
+      async send() {
+        throw new GatewayError('invalid', 'VITE_GATEWAY_URL was not set at build time')
+      },
     }
 
 async function main(): Promise<void> {

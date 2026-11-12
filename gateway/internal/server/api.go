@@ -3,10 +3,14 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	qrcode "github.com/skip2/go-qrcode"
 
@@ -16,10 +20,22 @@ import (
 
 // ChatStore is the part of the message store the API reads.
 type ChatStore interface {
-	Chats(ctx context.Context, limit int, unanswered bool) ([]store.Chat, error)
+	Chats(ctx context.Context, limit int, filter store.Filter) ([]store.Chat, error)
+	SetUnread(ctx context.Context, chatID string, unread int) error
 	Chat(ctx context.Context, id string) (store.Chat, bool, error)
 	Messages(ctx context.Context, chatID string, limit int, before time.Time) ([]store.Message, error)
 }
+
+// Sender delivers a text message to an existing chat.
+type Sender interface {
+	Send(ctx context.Context, chatID, text string) error
+}
+
+// Limits for replies. A recording is 16 kHz, 16 bit, mono: 32 kB per second.
+const (
+	maxSendChars     = 4000
+	maxRecordingSize = 16000 * 2 * 120
+)
 
 // LinkStatus describes the WhatsApp session for the admin page.
 type LinkStatus struct {
@@ -59,11 +75,14 @@ type messageJSON struct {
 
 // api holds what the stage 1 handlers share.
 type api struct {
-	store ChatStore
-	link  func() LinkStatus
-	pair  func()
-	now   func() time.Time
-	loc   *time.Location
+	store      ChatStore
+	link       func() LinkStatus
+	pair       func()
+	sender     Sender
+	transcribe func(ctx context.Context, pcm []byte) (string, string, error)
+	log        *slog.Logger
+	now        func() time.Time
+	loc        *time.Location
 }
 
 func (a *api) chats(w http.ResponseWriter, r *http.Request) {
@@ -75,16 +94,18 @@ func (a *api) chats(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var unanswered bool
+	filter := store.All
 	switch r.URL.Query().Get("filter") {
 	case "":
+	case "unread":
+		filter = store.Unread
 	case "unanswered":
-		unanswered = true
+		filter = store.Unanswered
 	default:
-		writeError(w, http.StatusBadRequest, "filter must be unanswered or absent")
+		writeError(w, http.StatusBadRequest, "filter must be unread, unanswered or absent")
 		return
 	}
-	chats, err := a.store.Chats(r.Context(), limit, unanswered)
+	chats, err := a.store.Chats(r.Context(), limit, filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read chats")
 		return
@@ -135,7 +156,9 @@ func (a *api) messages(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case m.FromMe:
 			sender = "Me"
-		case sender == "":
+		case sender == "" || !chat.Group:
+			// In a direct chat the other person is the chat itself; its name
+			// is kept current, while a stored sender may be a bare number.
 			sender = chatOut.Name
 		}
 		out = append(out, messageJSON{
@@ -149,6 +172,93 @@ func (a *api) messages(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"chat": chatOut, "messages": out})
+}
+
+// markRead clears the gateway's own unread counter for a chat. It does not
+// send a read receipt to WhatsApp.
+func (a *api) markRead(w http.ResponseWriter, r *http.Request) {
+	if a.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "message store is not configured")
+		return
+	}
+	chat, found, err := a.store.Chat(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read chat")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "unknown chat")
+		return
+	}
+	if err := a.store.SetUnread(r.Context(), chat.ID, 0); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not mark chat read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
+}
+
+// send delivers a reply. The text is sent exactly as received; only chats
+// that already exist can be answered.
+func (a *api) send(w http.ResponseWriter, r *http.Request) {
+	if a.sender == nil || a.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "sending is not enabled")
+		return
+	}
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "body must be JSON with a text field")
+		return
+	}
+	text := strings.TrimSpace(body.Text)
+	if text == "" || utf8.RuneCountInString(text) > maxSendChars {
+		writeError(w, http.StatusBadRequest, "text must have 1 to 4000 characters")
+		return
+	}
+	chat, found, err := a.store.Chat(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read chat")
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "unknown chat")
+		return
+	}
+	if err := a.sender.Send(r.Context(), chat.ID, text); err != nil {
+		a.log.Warn("send failed", "error", err)
+		writeError(w, http.StatusBadGateway, "message was not sent: "+translit.ASCII(err.Error()))
+		return
+	}
+	// The log records that a message was sent, never its text.
+	a.log.Info("message sent", "chars", utf8.RuneCountInString(text))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+// transcribeAudio turns a recording into text. It returns the text to send
+// and an ASCII copy to display on the glasses.
+func (a *api) transcribeAudio(w http.ResponseWriter, r *http.Request) {
+	if a.transcribe == nil {
+		writeError(w, http.StatusServiceUnavailable, "speech-to-text is not configured")
+		return
+	}
+	pcm, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRecordingSize))
+	if err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "recording is longer than 2 minutes")
+		return
+	}
+	if len(pcm) < 2 {
+		writeError(w, http.StatusBadRequest, "recording is empty")
+		return
+	}
+	text, lang, err := a.transcribe(r.Context(), pcm)
+	if err != nil {
+		a.log.Warn("transcription failed", "error", err)
+		writeError(w, http.StatusBadGateway, "transcription failed: "+translit.ASCII(err.Error()))
+		return
+	}
+	a.log.Info("transcribed", "seconds", len(pcm)/32000, "lang", lang, "chars", utf8.RuneCountInString(text))
+	writeJSON(w, http.StatusOK, map[string]string{"text": text, "display": displayText(text), "lang": lang})
 }
 
 func (a *api) adminStatus(w http.ResponseWriter, r *http.Request) {

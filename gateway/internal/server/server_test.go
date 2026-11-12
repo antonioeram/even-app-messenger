@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -207,15 +209,23 @@ func TestHelloIsOpenWhenNoTokenIsConfigured(t *testing.T) {
 // --- stage 1: chats and messages ---
 
 type fakeStore struct {
-	chats         []store.Chat
-	messages      map[string][]store.Message
-	gotLimit      int
-	gotBefore     time.Time
-	gotUnanswered bool
+	chats     []store.Chat
+	messages  map[string][]store.Message
+	gotLimit  int
+	gotBefore time.Time
+	gotFilter store.Filter
+	readChat  string
 }
 
-func (f *fakeStore) Chats(_ context.Context, limit int, unanswered bool) ([]store.Chat, error) {
-	f.gotLimit, f.gotUnanswered = limit, unanswered
+func (f *fakeStore) SetUnread(_ context.Context, chatID string, unread int) error {
+	if unread == 0 {
+		f.readChat = chatID
+	}
+	return nil
+}
+
+func (f *fakeStore) Chats(_ context.Context, limit int, filter store.Filter) ([]store.Chat, error) {
+	f.gotLimit, f.gotFilter = limit, filter
 	return f.chats, nil
 }
 
@@ -439,19 +449,45 @@ func TestAdminPageReadsTheTokenFromTheURLFragment(t *testing.T) {
 	}
 }
 
-func TestChatsFilterUnanswered(t *testing.T) {
+func TestChatsFilters(t *testing.T) {
 	st := sampleStore()
 	h := newStoreHandler(config.Config{}, st, nil)
-	do(t, h, http.MethodGet, "/chats", nil)
-	if st.gotUnanswered {
-		t.Error("no filter: store was asked for unanswered chats only")
-	}
-	do(t, h, http.MethodGet, "/chats?filter=unanswered", nil)
-	if !st.gotUnanswered {
-		t.Error("filter=unanswered was not passed to the store")
+	for query, want := range map[string]store.Filter{"": store.All, "?filter=unread": store.Unread, "?filter=unanswered": store.Unanswered} {
+		do(t, h, http.MethodGet, "/chats"+query, nil)
+		if st.gotFilter != want {
+			t.Errorf("/chats%s: filter = %v, want %v", query, st.gotFilter, want)
+		}
 	}
 	if rec := do(t, h, http.MethodGet, "/chats?filter=bogus", nil); rec.Code != http.StatusBadRequest {
 		t.Errorf("unknown filter: status = %d, want 400", rec.Code)
+	}
+}
+
+func TestDirectChatMessagesShowTheChatNameNotAPhoneNumber(t *testing.T) {
+	st := &fakeStore{
+		chats: []store.Chat{{ID: "40711@s.whatsapp.net", Name: "Ana Pop", LastTime: fixedNow, Preview: "x"}},
+		messages: map[string][]store.Message{"40711@s.whatsapp.net": {
+			{ChatID: "40711@s.whatsapp.net", ID: "m1", Sender: "+40711", Time: fixedNow, Text: "Buna"},
+		}},
+	}
+	rec := do(t, newStoreHandler(config.Config{}, st, nil), http.MethodGet, "/chats/40711@s.whatsapp.net/messages", nil)
+	if got := decode(t, rec)["messages"].([]any)[0].(map[string]any)["sender"]; got != "Ana Pop" {
+		t.Errorf("sender = %v, want Ana Pop", got)
+	}
+}
+
+func TestMarkReadClearsTheUnreadCounter(t *testing.T) {
+	st := sampleStore()
+	h := newStoreHandler(config.Config{Token: "s3cret"}, st, nil)
+	if rec := do(t, h, http.MethodPost, "/chats/40711@s.whatsapp.net/read", nil); rec.Code != http.StatusUnauthorized || st.readChat != "" {
+		t.Fatalf("without token: status = %d, read %q", rec.Code, st.readChat)
+	}
+	auth := map[string]string{"Authorization": "Bearer s3cret"}
+	if rec := do(t, h, http.MethodPost, "/chats/40711@s.whatsapp.net/read", auth); rec.Code != http.StatusOK || st.readChat != "40711@s.whatsapp.net" {
+		t.Errorf("status = %d, read %q", rec.Code, st.readChat)
+	}
+	if rec := do(t, h, http.MethodPost, "/chats/nope/read", auth); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown chat: status = %d, want 404", rec.Code)
 	}
 }
 
@@ -473,5 +509,140 @@ func TestEmojiOnlyTextGetsALabel(t *testing.T) {
 	}
 	if got := messages[1].(map[string]any)["text"]; got != "" {
 		t.Errorf("empty text = %v, want empty", got)
+	}
+}
+
+// --- stages 2-3: sending and speech-to-text ---
+
+type fakeSender struct {
+	chat, text string
+	err        error
+}
+
+func (f *fakeSender) Send(_ context.Context, chatID, text string) error {
+	f.chat, f.text = chatID, text
+	return f.err
+}
+
+func doBody(t *testing.T, h http.Handler, method, path, contentType string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", contentType)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func replyHandler(token string, sender Sender, transcribe func(context.Context, []byte) (string, string, error)) http.Handler {
+	return New(config.Config{Token: token, CORSOrigins: []string{"*"}}, Options{
+		Version: "test", Now: func() time.Time { return fixedNow }, Location: time.UTC,
+		Store: sampleStore(), Sender: sender, Transcribe: transcribe,
+	})
+}
+
+func TestSendDeliversTheExactTextToTheChat(t *testing.T) {
+	sender := &fakeSender{}
+	rec := doBody(t, replyHandler("", sender, nil), http.MethodPost, "/chats/40711@s.whatsapp.net/send",
+		"application/json", []byte(`{"text":"Ajung în zece minute 👍"}`), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	// Unlike what the glasses display, the text that is sent keeps its diacritics.
+	if sender.chat != "40711@s.whatsapp.net" || sender.text != "Ajung în zece minute 👍" {
+		t.Errorf("sent %q to %q", sender.text, sender.chat)
+	}
+}
+
+func TestSendRejectsWhatItShouldNotSend(t *testing.T) {
+	cases := []struct {
+		name, path, body string
+		want             int
+	}{
+		{"empty text", "/chats/40711@s.whatsapp.net/send", `{"text":"   "}`, http.StatusBadRequest},
+		{"not JSON", "/chats/40711@s.whatsapp.net/send", `text=hi`, http.StatusBadRequest},
+		{"too long", "/chats/40711@s.whatsapp.net/send", `{"text":"` + strings.Repeat("x", 4001) + `"}`, http.StatusBadRequest},
+		// Only chats that already exist can be answered: no messages to arbitrary numbers.
+		{"unknown chat", "/chats/40799999999@s.whatsapp.net/send", `{"text":"hi"}`, http.StatusNotFound},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sender := &fakeSender{}
+			rec := doBody(t, replyHandler("", sender, nil), http.MethodPost, c.path, "application/json", []byte(c.body), nil)
+			if rec.Code != c.want || sender.text != "" {
+				t.Errorf("status = %d (want %d), sent %q", rec.Code, c.want, sender.text)
+			}
+		})
+	}
+}
+
+func TestSendRequiresToken(t *testing.T) {
+	sender := &fakeSender{}
+	rec := doBody(t, replyHandler("s3cret", sender, nil), http.MethodPost, "/chats/40711@s.whatsapp.net/send",
+		"application/json", []byte(`{"text":"hi"}`), nil)
+	if rec.Code != http.StatusUnauthorized || sender.text != "" {
+		t.Errorf("status = %d, sent %q", rec.Code, sender.text)
+	}
+}
+
+func TestSendReportsFailureAndMissingSender(t *testing.T) {
+	failing := &fakeSender{err: errors.New("not connected")}
+	if rec := doBody(t, replyHandler("", failing, nil), http.MethodPost, "/chats/40711@s.whatsapp.net/send", "application/json", []byte(`{"text":"hi"}`), nil); rec.Code != http.StatusBadGateway {
+		t.Errorf("send failure: status = %d, want 502", rec.Code)
+	}
+	if rec := doBody(t, replyHandler("", nil, nil), http.MethodPost, "/chats/40711@s.whatsapp.net/send", "application/json", []byte(`{"text":"hi"}`), nil); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("no sender: status = %d, want 503", rec.Code)
+	}
+}
+
+func TestTranscribeReturnsTextToSendAndTextToDisplay(t *testing.T) {
+	var got []byte
+	transcribe := func(_ context.Context, pcm []byte) (string, string, error) {
+		got = pcm
+		return "Ajung în zece minute", "ro", nil
+	}
+	pcm := bytes.Repeat([]byte{1, 2}, 16000) // one second
+	rec := doBody(t, replyHandler("", nil, transcribe), http.MethodPost, "/transcribe", "application/octet-stream", pcm, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := decode(t, rec)
+	if body["text"] != "Ajung în zece minute" || body["display"] != "Ajung in zece minute" || body["lang"] != "ro" {
+		t.Errorf("body = %v", body)
+	}
+	if !bytes.Equal(got, pcm) {
+		t.Error("the recording did not reach the transcriber unchanged")
+	}
+}
+
+func TestTranscribeRejectsBadRecordings(t *testing.T) {
+	called := false
+	transcribe := func(context.Context, []byte) (string, string, error) { called = true; return "x", "ro", nil }
+	h := replyHandler("", nil, transcribe)
+	if rec := doBody(t, h, http.MethodPost, "/transcribe", "application/octet-stream", nil, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("empty: status = %d, want 400", rec.Code)
+	}
+	tooLong := make([]byte, 16000*2*121)
+	if rec := doBody(t, h, http.MethodPost, "/transcribe", "application/octet-stream", tooLong, nil); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("too long: status = %d, want 413", rec.Code)
+	}
+	if called {
+		t.Error("transcriber was called for a rejected recording")
+	}
+}
+
+func TestTranscribeFailureAndMissingTranscriber(t *testing.T) {
+	failing := func(context.Context, []byte) (string, string, error) { return "", "", errors.New("gpu busy") }
+	pcm := []byte{1, 2, 3, 4}
+	if rec := doBody(t, replyHandler("", nil, failing), http.MethodPost, "/transcribe", "application/octet-stream", pcm, nil); rec.Code != http.StatusBadGateway {
+		t.Errorf("failure: status = %d, want 502", rec.Code)
+	}
+	if rec := doBody(t, replyHandler("", nil, nil), http.MethodPost, "/transcribe", "application/octet-stream", pcm, nil); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("no transcriber: status = %d, want 503", rec.Code)
+	}
+	if rec := doBody(t, replyHandler("s3cret", nil, failing), http.MethodPost, "/transcribe", "application/octet-stream", pcm, nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
 	}
 }

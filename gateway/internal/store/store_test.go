@@ -28,7 +28,7 @@ func TestSaveMessageCreatesChatWithPreview(t *testing.T) {
 	if _, err := s.SaveMessage(ctx, msg("ana@s.whatsapp.net", "m1", 0, "Salut")); err != nil {
 		t.Fatal(err)
 	}
-	chats, err := s.Chats(ctx, 10, false)
+	chats, err := s.Chats(ctx, 10, All)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestChatsOrderUnreadFirstThenNewest(t *testing.T) {
 	if err := s.SetUnread(ctx, "old-unread", 2); err != nil {
 		t.Fatal(err)
 	}
-	chats, _ := s.Chats(ctx, 10, false)
+	chats, _ := s.Chats(ctx, 10, All)
 	got := []string{chats[0].ID, chats[1].ID, chats[2].ID}
 	want := []string{"old-unread", "newest-read", "mid-read"}
 	for i := range want {
@@ -75,7 +75,7 @@ func TestChatsHonoursLimit(t *testing.T) {
 	s, ctx := open(t), context.Background()
 	s.SaveMessage(ctx, msg("a", "m1", 0, "a"))
 	s.SaveMessage(ctx, msg("b", "m2", 1, "b"))
-	chats, _ := s.Chats(ctx, 1, false)
+	chats, _ := s.Chats(ctx, 1, All)
 	if len(chats) != 1 || chats[0].ID != "b" {
 		t.Errorf("chats = %+v", chats)
 	}
@@ -151,7 +151,7 @@ func TestOlderMessageDoesNotReplacePreview(t *testing.T) {
 	s, ctx := open(t), context.Background()
 	s.SaveMessage(ctx, msg("a", "new", 10, "new"))
 	s.SaveMessage(ctx, msg("a", "old", 0, "old"))
-	chats, _ := s.Chats(ctx, 1, false)
+	chats, _ := s.Chats(ctx, 1, All)
 	if chats[0].Preview != "new" || !chats[0].LastTime.Equal(t0.Add(10*time.Minute)) {
 		t.Errorf("chat = %+v", chats[0])
 	}
@@ -198,7 +198,7 @@ func TestUnansweredListsDirectChatsWhoseNewestMessageIsIncoming(t *testing.T) {
 	s.UpsertChat(ctx, Chat{ID: "group", Name: "Familia", Group: true})
 	s.SaveMessage(ctx, msg("group", "m4", 3, "hello all"))
 
-	chats, err := s.Chats(ctx, 10, true)
+	chats, err := s.Chats(ctx, 10, Unanswered)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestOlderOwnMessageDoesNotMarkChatAsAnswered(t *testing.T) {
 	old := msg("a", "old", 0, "mine")
 	old.FromMe = true
 	s.SaveMessage(ctx, old) // history arrives after the live message
-	chats, _ := s.Chats(ctx, 10, true)
+	chats, _ := s.Chats(ctx, 10, Unanswered)
 	if len(chats) != 1 {
 		t.Errorf("unanswered = %+v, want the chat", chats)
 	}
@@ -241,8 +241,79 @@ func TestOpenUpgradesADatabaseFromBeforeTheAnsweredFlag(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer s.Close()
-	chats, _ := s.Chats(ctx, 10, true)
+	chats, _ := s.Chats(ctx, 10, Unanswered)
 	if len(chats) != 1 || chats[0].ID != "waiting" {
 		t.Errorf("unanswered after upgrade = %+v", chats)
+	}
+}
+
+func TestUnreadListsOnlyChatsWithUnreadMessages(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	s.SaveMessage(ctx, msg("read", "m1", 0, "old"))
+	s.SaveMessage(ctx, msg("unread", "m2", 1, "new"))
+	s.AddUnread(ctx, "unread", 1)
+	chats, _ := s.Chats(ctx, 10, Unread)
+	if len(chats) != 1 || chats[0].ID != "unread" {
+		t.Errorf("unread = %+v", chats)
+	}
+}
+
+func TestUnansweredLeavesOutUnreadChats(t *testing.T) {
+	// Unread chats have their own box; a chat is shown in one place only.
+	s, ctx := open(t), context.Background()
+	s.SaveMessage(ctx, msg("read-waiting", "m1", 0, "ping"))
+	s.SaveMessage(ctx, msg("unread", "m2", 1, "ping"))
+	s.AddUnread(ctx, "unread", 1)
+	chats, _ := s.Chats(ctx, 10, Unanswered)
+	if len(chats) != 1 || chats[0].ID != "read-waiting" {
+		t.Errorf("unanswered = %+v", chats)
+	}
+}
+
+func TestMessagesUseTheCurrentNameOfTheSender(t *testing.T) {
+	// History is stored before the address book arrives; names must follow later.
+	s, ctx := open(t), context.Background()
+	m := msg("group", "m1", 0, "salut")
+	m.Sender, m.SenderID = "+40711000001", "40711000001@s.whatsapp.net"
+	s.SaveMessage(ctx, m)
+	s.UpsertChat(ctx, Chat{ID: "40711000001@s.whatsapp.net", Name: "Ana Pop"})
+	got, _ := s.Messages(ctx, "group", 5, time.Time{})
+	if len(got) != 1 || got[0].Sender != "Ana Pop" {
+		t.Errorf("messages = %+v, want sender Ana Pop", got)
+	}
+}
+
+func TestMessagesKeepTheStoredSenderWhenNoNameIsKnown(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	m := msg("group", "m1", 0, "salut")
+	m.Sender, m.SenderID = "anutza", "40711000001@s.whatsapp.net"
+	s.SaveMessage(ctx, m)
+	got, _ := s.Messages(ctx, "group", 5, time.Time{})
+	if got[0].Sender != "anutza" {
+		t.Errorf("sender = %q, want anutza", got[0].Sender)
+	}
+}
+
+func TestOpenUpgradeDerivesSenderIDFromStoredPhoneNumbers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "messages.db")
+	ctx := context.Background()
+	s, _ := Open(ctx, path)
+	m := msg("group", "m1", 0, "salut")
+	m.Sender = "+40711000001"
+	s.SaveMessage(ctx, m)
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE messages DROP COLUMN sender_id`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	s.UpsertChat(ctx, Chat{ID: "40711000001@s.whatsapp.net", Name: "Ana Pop"})
+	got, _ := s.Messages(ctx, "group", 5, time.Time{})
+	if len(got) != 1 || got[0].Sender != "Ana Pop" {
+		t.Errorf("messages after upgrade = %+v", got)
 	}
 }

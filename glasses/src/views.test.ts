@@ -62,13 +62,17 @@ describe('inboxText', () => {
     expect(text.split('\n')).toHaveLength(1 + INBOX_ROWS)
   })
 
-  it('adds a selectable extra row after the chats', () => {
-    const rows = inboxText('Unanswered', [chat()], 1, '[All chats]').split('\n')
-    expect(rows).toEqual(['Unanswered (1)', '  09:36 Ana Pop: Vii maine?', '> [All chats]'])
+  it('adds selectable extra rows after the chats', () => {
+    const rows = inboxText('Unread', [chat()], 2, ['[Unanswered]', '[All chats]']).split('\n')
+    expect(rows).toEqual(['Unread (1)', '  09:36 Ana Pop: Vii maine?', '  [Unanswered]', '> [All chats]'])
   })
 
-  it('shows the extra row alone when there are no chats', () => {
-    expect(inboxText('Unanswered', [], 0, '[All chats]').split('\n')).toEqual(['Unanswered (0)', '> [All chats]'])
+  it('shows the extra rows alone when there are no chats', () => {
+    expect(inboxText('Unread', [], 0, ['[Unanswered]', '[All chats]']).split('\n')).toEqual([
+      'Unread (0)',
+      '> [Unanswered]',
+      '  [All chats]',
+    ])
   })
 })
 

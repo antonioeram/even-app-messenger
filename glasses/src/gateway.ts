@@ -37,18 +37,36 @@ export interface Conversation {
   messages: Message[]
 }
 
-/** 'unanswered': direct chats whose newest message is not mine. */
-export type ChatFilter = 'unanswered'
+/**
+ * 'unread': chats with unread messages.
+ * 'unanswered': read direct chats whose newest message is not mine.
+ */
+export type ChatFilter = 'unread' | 'unanswered'
+
+export interface Transcript {
+  /** What was said; this is what gets sent. */
+  text: string
+  /** The same text in ASCII, for the glasses. */
+  display: string
+  lang: string
+}
 
 export interface GatewayClient {
   chats(filter?: ChatFilter): Promise<Chat[]>
   messages(chatId: string): Promise<Conversation>
+  /** Clears the gateway's unread counter; sends no read receipt to WhatsApp. */
+  markRead(chatId: string): Promise<void>
+  /** pcm: 16 kHz, 16 bit, mono, little endian. */
+  transcribe(pcm: Uint8Array): Promise<Transcript>
+  send(chatId: string, text: string): Promise<void>
 }
 
 // A list on the glasses holds 20 items; one screen of text holds fewer
 // messages than this, so one page of each is enough for stage 1.
 const CHAT_LIMIT = 20
 const MESSAGE_LIMIT = 30
+const TRANSCRIBE_TIMEOUT_MS = 45_000
+const SEND_TIMEOUT_MS = 20_000
 
 export interface GatewayClientOptions {
   baseUrl: string
@@ -63,22 +81,36 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
   const fetchFn = options.fetchFn ?? ((input, init) => fetch(input, init))
   const timeoutMs = options.timeoutMs ?? 8000
 
-  async function getJson(path: string): Promise<unknown> {
+  interface Post {
+    body: BodyInit
+    contentType: string
+    /** Speech-to-text takes longer than a read. */
+    timeoutMs?: number
+  }
+
+  async function getJson(path: string, post?: Post): Promise<unknown> {
+    const limitMs = post?.timeoutMs ?? timeoutMs
     const controller = new AbortController()
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
       controller.abort()
-    }, timeoutMs)
+    }, limitMs)
 
     const headers: Record<string, string> = { Accept: 'application/json' }
     if (options.token) headers.Authorization = `Bearer ${options.token}`
+    const init: RequestInit = { headers, signal: controller.signal, cache: 'no-store' }
+    if (post) {
+      headers['Content-Type'] = post.contentType
+      init.method = 'POST'
+      init.body = post.body
+    }
 
     let response: Response
     try {
-      response = await fetchFn(`${baseUrl}${path}`, { headers, signal: controller.signal, cache: 'no-store' })
+      response = await fetchFn(`${baseUrl}${path}`, init)
     } catch (error) {
-      if (timedOut) throw new GatewayError('timeout', `no answer in ${Math.round(timeoutMs / 1000)} s`)
+      if (timedOut) throw new GatewayError('timeout', `no answer in ${Math.round(limitMs / 1000)} s`)
       // A blocked whitelist entry, a CORS failure, DNS and "offline" all end here:
       // the WebView does not say which one it was.
       throw new GatewayError('network', error instanceof Error ? error.message : String(error))
@@ -87,7 +119,14 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
     }
 
     if (response.status === 401) throw new GatewayError('unauthorized', 'missing or wrong token')
-    if (!response.ok) throw new GatewayError('http', `HTTP ${response.status}`)
+    if (!response.ok) {
+      // The gateway explains failures in an "error" field.
+      const reason = await response
+        .json()
+        .then((body: unknown) => (isRecord(body) && typeof body.error === 'string' ? body.error : ''))
+        .catch(() => '')
+      throw new GatewayError('http', reason ? `HTTP ${response.status}: ${reason}` : `HTTP ${response.status}`)
+    }
 
     try {
       return await response.json()
@@ -111,6 +150,30 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
         throw new GatewayError('invalid', 'response has no chat or messages')
       }
       return { chat: parseChat(body.chat), messages: body.messages.map(parseMessage) }
+    },
+
+    async markRead(chatId) {
+      await getJson(`/chats/${encodeURIComponent(chatId)}/read`, { body: '{}', contentType: 'application/json' })
+    },
+
+    async transcribe(pcm) {
+      const body = await getJson('/transcribe', {
+        body: pcm as BodyInit,
+        contentType: 'application/octet-stream',
+        timeoutMs: TRANSCRIBE_TIMEOUT_MS,
+      })
+      if (!isRecord(body) || typeof body.text !== 'string') {
+        throw new GatewayError('invalid', 'response has no text')
+      }
+      return { text: body.text, display: text(body.display) || body.text, lang: text(body.lang) }
+    },
+
+    async send(chatId, message) {
+      await getJson(`/chats/${encodeURIComponent(chatId)}/send`, {
+        body: JSON.stringify({ text: message }),
+        contentType: 'application/json',
+        timeoutMs: SEND_TIMEOUT_MS,
+      })
     },
   }
 }

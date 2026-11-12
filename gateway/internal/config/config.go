@@ -21,6 +21,11 @@ type Config struct {
 	DataDir string
 	// WhatsApp enables the WhatsApp connection. It needs DataDir.
 	WhatsApp bool
+	// STTURL is the speech-to-text endpoint; empty disables /transcribe.
+	STTURL string
+	// STTLanguages are the languages the user dictates in; the first one is
+	// used when detection picks something else.
+	STTLanguages []string
 }
 
 // Load reads the configuration through getenv (os.Getenv in production).
@@ -30,6 +35,13 @@ func Load(getenv func(string) string) (Config, error) {
 		Token:       getenv("GATEWAY_TOKEN"),
 		CORSOrigins: splitList(valueOr(getenv("GATEWAY_CORS_ORIGINS"), "*")),
 		DataDir:     strings.TrimSpace(getenv("GATEWAY_DATA_DIR")),
+		STTURL:      strings.TrimSpace(getenv("GATEWAY_STT_URL")),
+	}
+	cfg.STTLanguages = splitList(valueOr(getenv("GATEWAY_STT_LANGS"), "ro,en"))
+	if cfg.STTURL != "" {
+		if u, err := url.Parse(cfg.STTURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return Config{}, fmt.Errorf("GATEWAY_STT_URL: want an http(s) URL, got %q", cfg.STTURL)
+		}
 	}
 	cfg.WhatsApp = cfg.DataDir != "" && !strings.EqualFold(strings.TrimSpace(getenv("GATEWAY_WHATSAPP")), "off")
 	for _, origin := range cfg.CORSOrigins {

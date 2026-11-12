@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   AudioEvent,
   EventSourceType,
@@ -9,13 +9,15 @@ import {
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
 import { createApp, type GlassesBridge } from './app'
-import { GatewayError, type Chat, type Conversation, type GatewayClient, type Message } from './gateway'
+import { GatewayError, type Chat, type Conversation, type GatewayClient, type Message, type Transcript } from './gateway'
 import { MAIN_CONTAINER, MAX_UPGRADE_CHARS } from './screen'
 
 class FakeBridge implements GlassesBridge {
   created: string[] = []
   upgrades: string[] = []
   shutdowns: number[] = []
+  /** Microphone switch history: true = on. */
+  mic: boolean[] = []
   createResult = StartUpPageCreateResult.success
   private listener: ((event: EvenHubEvent) => void) | null = null
 
@@ -37,6 +39,11 @@ class FakeBridge implements GlassesBridge {
     expect(upgrade.containerName).toBe(MAIN_CONTAINER.name)
     expect((upgrade.content ?? '').length).toBeLessThanOrEqual(MAX_UPGRADE_CHARS)
     this.upgrades.push(upgrade.content ?? '')
+    return true
+  }
+
+  async audioControl(isOpen: boolean) {
+    this.mic.push(isOpen)
     return true
   }
 
@@ -80,14 +87,40 @@ const message = (text: string, over: Partial<Message> = {}): Message => ({
 
 type Step<T> = T | GatewayError
 
-function fakeGateway(options: { chats?: Step<Chat[]>[]; messages?: Step<Message[]>[] } = {}) {
+function fakeGateway(
+  options: {
+    chats?: Step<Chat[]>[]
+    messages?: Step<Message[]>[]
+    transcripts?: Step<Transcript>[]
+    sends?: (GatewayError | undefined)[]
+  } = {},
+) {
   const chatSteps = options.chats ?? [[ana, family]]
   const messageSteps = options.messages ?? [[message('Buna')]]
   const gateway = {
     chatCalls: 0,
     filters: [] as (string | undefined)[],
     messageCalls: [] as string[],
-    async chats(filter?: 'unanswered'): Promise<Chat[]> {
+    readCalls: [] as string[],
+    recordings: [] as Uint8Array[],
+    sent: [] as { chatId: string; text: string }[],
+    async markRead(chatId: string): Promise<void> {
+      gateway.readCalls.push(chatId)
+    },
+    async transcribe(pcm: Uint8Array): Promise<Transcript> {
+      gateway.recordings.push(pcm)
+      const step = options.transcripts?.[Math.min(gateway.recordings.length - 1, options.transcripts.length - 1)]
+      if (step instanceof GatewayError) throw step
+      return step ?? { text: 'Ajung în zece minute', display: 'Ajung in zece minute', lang: 'ro' }
+    },
+    sendAttempts: 0,
+    async send(chatId: string, text: string): Promise<void> {
+      const step = options.sends?.[Math.min(gateway.sendAttempts, options.sends.length - 1)]
+      gateway.sendAttempts += 1
+      if (step instanceof GatewayError) throw step
+      gateway.sent.push({ chatId, text })
+    },
+    async chats(filter?: 'unread' | 'unanswered'): Promise<Chat[]> {
       gateway.filters.push(filter)
       const step = chatSteps[Math.min(gateway.chatCalls, chatSteps.length - 1)]
       gateway.chatCalls += 1
@@ -113,6 +146,14 @@ const doubleClick: EvenHubEvent = {
 }
 const foregroundEnter: EvenHubEvent = {
   sysEvent: new Sys_ItemEvent({ eventType: OsEventTypeList.FOREGROUND_ENTER_EVENT }),
+}
+const holdStart: EvenHubEvent = { sysEvent: new Sys_ItemEvent({ eventType: OsEventTypeList.LONG_PRESS_EVENT }) }
+const holdEnd: EvenHubEvent = { sysEvent: new Sys_ItemEvent({ eventType: OsEventTypeList.LONG_PRESS_RELEASE_EVENT }) }
+/** One second of audio, in ten frames. */
+function speak(bridge: FakeBridge, seconds = 1) {
+  for (let i = 0; i < seconds * 10; i += 1) {
+    bridge.emit({ audioEvent: new AudioEvent({ audioPcm: new Uint8Array(3200).fill(i + 1) }) })
+  }
 }
 const ringClick: EvenHubEvent = {
   sysEvent: new Sys_ItemEvent({ eventSource: EventSourceType.TOUCH_EVENT_FROM_RING }),
@@ -170,7 +211,7 @@ describe('inbox', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unanswered (2)', '> 09:36 (2) Ana Pop: Vii maine?', '  11.11 Familia: ok', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (2)', '> 09:36 (2) Ana Pop: Vii maine?', '  11.11 Familia: ok', '  [Unanswered]', '  [All chats]'])
   })
 
   it('moves the selection down and up on scroll, without calling the gateway', async () => {
@@ -180,7 +221,7 @@ describe('inbox', () => {
 
     bridge.emit(scrollDown)
     await app.idle()
-    expect(bridge.lines).toEqual(['Unanswered (2)', '  09:36 (2) Ana Pop: Vii maine?', '> 11.11 Familia: ok', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (2)', '  09:36 (2) Ana Pop: Vii maine?', '> 11.11 Familia: ok', '  [Unanswered]', '  [All chats]'])
 
     bridge.emit(scrollUp)
     await app.idle()
@@ -219,16 +260,16 @@ describe('inbox', () => {
     bridge.emit(click)
     await app.idle()
 
-    expect(bridge.lines).toEqual(['Unanswered (1)', '> 09:36 (2) Ana Pop: Vii maine?', '  [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (1)', '> 09:36 (2) Ana Pop: Vii maine?', '  [Unanswered]', '  [All chats]'])
   })
 
-  it('asks the gateway for unanswered chats first', async () => {
+  it('asks the gateway for unread chats first', async () => {
     const gateway = fakeGateway()
     const { app } = setup(gateway)
 
     await app.start()
 
-    expect(gateway.filters).toEqual(['unanswered'])
+    expect(gateway.filters).toEqual(['unread'])
   })
 
   it('shows an empty box with the way to all chats', async () => {
@@ -236,7 +277,7 @@ describe('inbox', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unanswered (0)', '> [All chats]'])
+    expect(bridge.lines).toEqual(['Unread (0)', '> [Unanswered]', '  [All chats]'])
   })
 
   it('opens the box with all chats from the extra row', async () => {
@@ -245,18 +286,20 @@ describe('inbox', () => {
     await app.start()
     bridge.emit(scrollDown)
     bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
 
     bridge.emit(click)
     await app.idle()
 
-    expect(gateway.filters).toEqual(['unanswered', undefined])
+    expect(gateway.filters).toEqual(['unread', undefined])
     expect(bridge.lines).toEqual(['All chats (2)', '> 09:36 (2) Ana Pop: Vii maine?', '  11.11 Familia: ok'])
   })
 
-  it('goes back from all chats to the unanswered box on double click, without asking to exit', async () => {
+  it('goes back from all chats to the unread box on double click, without asking to exit', async () => {
     const gateway = fakeGateway()
     const { bridge, app } = setup(gateway)
     await app.start()
+    bridge.emit(scrollDown)
     bridge.emit(scrollDown)
     bridge.emit(scrollDown)
     bridge.emit(click)
@@ -266,8 +309,8 @@ describe('inbox', () => {
     await app.idle()
 
     expect(bridge.shutdowns).toEqual([])
-    expect(gateway.filters).toEqual(['unanswered', undefined, 'unanswered'])
-    expect(bridge.lines[0]).toBe('Unanswered (2)')
+    expect(gateway.filters).toEqual(['unread', undefined, 'unread'])
+    expect(bridge.lines[0]).toBe('Unread (2)')
   })
 
   it('reloads the list when the app returns to the foreground, keeping the selection', async () => {
@@ -379,7 +422,7 @@ describe('inside a chat', () => {
 
     expect(bridge.shutdowns).toEqual([])
     expect(gateway.chatCalls).toBe(2)
-    expect(bridge.lines[0]).toBe('Unanswered (2)')
+    expect(bridge.lines[0]).toBe('Unread (2)')
   })
 
   it('goes back to the inbox from a failed chat', async () => {
@@ -389,7 +432,7 @@ describe('inside a chat', () => {
     bridge.emit(doubleClick)
     await app.idle()
 
-    expect(bridge.lines[0]).toBe('Unanswered (2)')
+    expect(bridge.lines[0]).toBe('Unread (2)')
   })
 
   it('returns to the inbox with the chat it came from still selected', async () => {
@@ -438,6 +481,7 @@ describe('inside a chat', () => {
     const gateway = fakeGateway()
     const { bridge, app } = setup(gateway)
     await app.start()
+    bridge.emit(scrollDown)
     bridge.emit(scrollDown)
     bridge.emit(scrollDown)
     bridge.emit(click)
@@ -503,5 +547,216 @@ describe('diagnostics', () => {
     bridge.emit({ audioEvent: new AudioEvent({ audioPcm: new Uint8Array([1, 2, 3]) }) })
 
     expect(logs).toHaveLength(before)
+  })
+})
+
+describe('boxes', () => {
+  it('opens the unanswered box from its row and goes back on double click', async () => {
+    const gateway = fakeGateway()
+    const { bridge, app } = setup(gateway)
+    await app.start()
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+
+    bridge.emit(click)
+    await app.idle()
+    expect(gateway.filters).toEqual(['unread', 'unanswered'])
+    expect(bridge.lines[0]).toBe('Unanswered (2)')
+
+    bridge.emit(doubleClick)
+    await app.idle()
+    expect(bridge.shutdowns).toEqual([])
+    expect(bridge.lines[0]).toBe('Unread (2)')
+  })
+
+  it('marks an unread chat as read on the gateway when it is opened', async () => {
+    const { gateway } = await openChat(0)
+
+    expect(gateway.readCalls).toEqual(['ana@s.whatsapp.net'])
+  })
+
+  it('does not mark a chat that has nothing unread', async () => {
+    const { gateway } = await openChat(1)
+
+    expect(gateway.readCalls).toEqual([])
+  })
+})
+
+describe('voice reply', () => {
+  async function dictate(gateway = fakeGateway()) {
+    const context = await openChat(0, gateway)
+    context.bridge.emit(holdStart)
+    await context.app.idle()
+    speak(context.bridge)
+    context.bridge.emit(holdEnd)
+    await context.app.idle()
+    return context
+  }
+
+  it('turns the glasses microphone on while the touchpad is held', async () => {
+    const { bridge, app } = await openChat()
+
+    bridge.emit(holdStart)
+    await app.idle()
+    expect(bridge.mic).toEqual([true])
+    expect(bridge.text).toContain('Recording')
+
+    bridge.emit(holdEnd)
+    await app.idle()
+    expect(bridge.mic).toEqual([true, false])
+  })
+
+  it('sends the recording to the gateway as one piece', async () => {
+    const { gateway } = await dictate()
+
+    expect(gateway.recordings).toHaveLength(1)
+    expect(gateway.recordings[0]).toHaveLength(32000)
+    expect(gateway.recordings[0]?.[0]).toBe(1)
+    expect(gateway.recordings[0]?.[31999]).toBe(10)
+  })
+
+  it('shows the transcript and waits: nothing is sent without a click', async () => {
+    const { bridge, gateway } = await dictate()
+
+    expect(bridge.text).toContain('Reply to Ana Pop')
+    expect(bridge.text).toContain('Ajung in zece minute')
+    expect(bridge.text).toContain('Click = send')
+    expect(gateway.sent).toEqual([])
+  })
+
+  it('sends the original text, with diacritics, on click and reloads the chat', async () => {
+    const { bridge, app, gateway } = await dictate()
+
+    bridge.emit(click)
+    await app.idle()
+
+    expect(gateway.sent).toEqual([{ chatId: 'ana@s.whatsapp.net', text: 'Ajung în zece minute' }])
+    expect(gateway.messageCalls).toHaveLength(2)
+    expect(bridge.lines[0]).toBe('Ana Pop 1/1')
+  })
+
+  it('sends only once when click is repeated', async () => {
+    const { bridge, app, gateway } = await dictate()
+
+    bridge.emit(click)
+    bridge.emit(click)
+    bridge.emit(ringClick)
+    await app.idle()
+
+    expect(gateway.sent).toHaveLength(1)
+  })
+
+  it('cancels on double click and returns to the chat without sending', async () => {
+    const { bridge, app, gateway } = await dictate()
+
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    expect(gateway.sent).toEqual([])
+    expect(bridge.lines[0]).toBe('Ana Pop 1/1')
+    // Still in the chat: another double click goes back to the list.
+    bridge.emit(doubleClick)
+    await app.idle()
+    expect(bridge.lines[0]).toBe('Unread (2)')
+  })
+
+  it('keeps the transcript when sending fails, so click can retry', async () => {
+    const gateway = fakeGateway({ sends: [new GatewayError('http', 'HTTP 502'), undefined] })
+    const { bridge, app } = await dictate(gateway)
+
+    bridge.emit(click)
+    await app.idle()
+    expect(bridge.text).toContain('Not sent')
+    expect(bridge.text).toContain('Ajung in zece minute')
+    expect(gateway.sent).toEqual([])
+
+    bridge.emit(click)
+    await app.idle()
+    expect(gateway.sent).toHaveLength(1)
+  })
+
+  it('says so when nothing was understood, and sends nothing on click', async () => {
+    const gateway = fakeGateway({ transcripts: [{ text: '', display: '', lang: 'ro' }] })
+    const { bridge, app } = await dictate(gateway)
+    expect(bridge.text).toContain('Nothing understood')
+
+    bridge.emit(click)
+    await app.idle()
+    expect(gateway.sent).toEqual([])
+    expect(bridge.lines[0]).toBe('Ana Pop 1/1')
+  })
+
+  it('shows the reason when transcription fails', async () => {
+    const gateway = fakeGateway({ transcripts: [new GatewayError('http', 'HTTP 503')] })
+    const { bridge } = await dictate(gateway)
+
+    expect(bridge.text).toContain('HTTP 503')
+    expect(gateway.sent).toEqual([])
+  })
+
+  it('ignores a hold that recorded almost nothing', async () => {
+    const { bridge, app, gateway } = await openChat()
+
+    bridge.emit(holdStart)
+    await app.idle()
+    bridge.emit(holdEnd)
+    await app.idle()
+
+    expect(gateway.recordings).toEqual([])
+    expect(bridge.text).toContain('Nothing recorded')
+  })
+
+  it('cancels a recording on double click and turns the microphone off', async () => {
+    const { bridge, app, gateway } = await openChat()
+    bridge.emit(holdStart)
+    await app.idle()
+    speak(bridge)
+
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    expect(bridge.mic).toEqual([true, false])
+    expect(gateway.recordings).toEqual([])
+    expect(bridge.lines[0]).toBe('Ana Pop 1/1')
+  })
+
+  it('does not record outside a chat', async () => {
+    const { bridge, app } = setup()
+    await app.start()
+
+    bridge.emit(holdStart)
+    speak(bridge)
+    bridge.emit(holdEnd)
+    await app.idle()
+
+    expect(bridge.mic).toEqual([])
+    expect(bridge.lines[0]).toBe('Unread (2)')
+  })
+
+  it('stops a recording that runs past the limit', async () => {
+    vi.useFakeTimers()
+    try {
+      const { bridge, app, gateway } = await openChat()
+      bridge.emit(holdStart)
+      await app.idle()
+      speak(bridge)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      await app.idle()
+
+      expect(bridge.mic).toEqual([true, false])
+      expect(gateway.recordings).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the transcript when the app returns to the foreground', async () => {
+    const { bridge, app } = await dictate()
+
+    bridge.emit(foregroundEnter)
+    await app.idle()
+
+    expect(bridge.text).toContain('Click = send')
   })
 })

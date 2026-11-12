@@ -23,6 +23,7 @@ import (
 	"github.com/antonioeram/even-app-messenger/gateway/internal/config"
 	"github.com/antonioeram/even-app-messenger/gateway/internal/server"
 	"github.com/antonioeram/even-app-messenger/gateway/internal/store"
+	"github.com/antonioeram/even-app-messenger/gateway/internal/stt"
 	"github.com/antonioeram/even-app-messenger/gateway/internal/whatsapp"
 )
 
@@ -77,10 +78,19 @@ func run(cfg config.Config, logger *slog.Logger) error {
 			defer wa.Close()
 			wa.Start(ctx)
 			opts.Pair = wa.Pair
+			opts.Sender = wa
 			opts.Link = func() server.LinkStatus {
 				st := wa.Status()
 				return server.LinkStatus{State: st.State, QR: st.QR, Account: st.Account}
 			}
+		}
+	}
+
+	if cfg.STTURL != "" {
+		speech := &stt.Client{URL: cfg.STTURL, Languages: cfg.STTLanguages}
+		opts.Transcribe = func(ctx context.Context, pcm []byte) (string, string, error) {
+			result, err := speech.Transcribe(ctx, pcm)
+			return result.Text, result.Language, err
 		}
 	}
 
@@ -102,6 +112,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 			"cors_origins", cfg.CORSOrigins,
 			"data_dir", cfg.DataDir,
 			"whatsapp", cfg.WhatsApp,
+			"speech_to_text", cfg.STTURL != "",
 		)
 		errc <- srv.ListenAndServe()
 	}()

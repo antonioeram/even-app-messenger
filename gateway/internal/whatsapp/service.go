@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -256,9 +258,10 @@ func (s *Service) saveMessage(ctx context.Context, evt *events.Message, live boo
 		chatJID = s.canonical(ctx, info.Chat, alt)
 	}
 
-	sender := ""
+	sender, senderID := "", ""
 	if !info.IsFromMe {
 		senderJID := s.canonical(ctx, info.Sender, info.SenderAlt)
+		senderID = senderJID.String()
 		if sender = s.contactName(ctx, senderJID, info.PushName); sender == "" {
 			sender = "+" + senderJID.User
 		}
@@ -279,7 +282,7 @@ func (s *Service) saveMessage(ctx context.Context, evt *events.Message, live boo
 		return
 	}
 	isNew, err := s.store.SaveMessage(ctx, store.Message{
-		ChatID: id, ID: info.ID, Sender: sender, FromMe: info.IsFromMe, Time: info.Timestamp, Text: text, Kind: kind,
+		ChatID: id, ID: info.ID, Sender: sender, SenderID: senderID, FromMe: info.IsFromMe, Time: info.Timestamp, Text: text, Kind: kind,
 	})
 	if err != nil {
 		s.warn("store message", err)
@@ -294,6 +297,28 @@ func (s *Service) saveMessage(ctx context.Context, evt *events.Message, live boo
 	} else {
 		s.warn("count unread", s.store.AddUnread(ctx, id, 1))
 	}
+}
+
+// Send delivers a text message to a chat and records it in the store.
+func (s *Service) Send(ctx context.Context, chatID, text string) error {
+	if s.Status().State != StateConnected {
+		return errors.New("WhatsApp is not connected")
+	}
+	to, err := types.ParseJID(chatID)
+	if err != nil || to.User == "" {
+		return fmt.Errorf("invalid chat address %q", chatID)
+	}
+	resp, err := s.cli.SendMessage(ctx, to, &waE2E.Message{Conversation: proto.String(text)})
+	if err != nil {
+		return err
+	}
+	if _, err := s.store.SaveMessage(ctx, store.Message{
+		ChatID: chatID, ID: resp.ID, FromMe: true, Time: resp.Timestamp, Text: text, Kind: "text",
+	}); err != nil {
+		s.warn("store sent message", err)
+	}
+	s.warn("reset unread", s.store.SetUnread(ctx, chatID, 0))
+	return nil
 }
 
 func (s *Service) saveHistory(sync *events.HistorySync) {
