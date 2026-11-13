@@ -113,7 +113,7 @@ describe('inbox page', () => {
     const update = rowUpdate(0, { text: 'changed', selected: true }, true)
     expect(update.containerID).toBe(first?.containerID)
     expect(update.containerName).toBe(first?.containerName)
-    expect(update.content).toBe('changed')
+    expect(update.content?.trim()).toBe('changed')
     expect(update.textColor).toBe(4)
     expect(headUpdate('All chats (9)').containerID).toBe(HEAD.id)
   })
@@ -150,7 +150,18 @@ describe('selection marker', () => {
   })
 
   it('leaves the text unmarked when images mark the selection', () => {
-    expect(expectValidPage(inboxPage('Unread (3)', rows(3), true)).slice(1).map((box) => box.content)).toEqual(['row 0', 'row 1', 'row 2'])
+    const contents = expectValidPage(inboxPage('Unread (3)', rows(3), true)).slice(1).map((box) => box.content?.trim())
+    expect(contents).toEqual(['row 0', 'row 1', 'row 2'])
+  })
+
+  it('keeps every line of a chat row two spaces away from the marker cell', () => {
+    const chat = { text: 'Ana Pop  09:36\nVii maine?', selected: true }
+    const link = { text: 'All chats', selected: false, centered: true }
+    const [, chatBox, linkBox] = expectValidPage(inboxPage('Unread (1)', [chat, link], true))
+    expect(chatBox?.content).toBe('  Ana Pop  09:36\n  Vii maine?')
+    expect(rowUpdate(0, chat, true).content).toBe('  Ana Pop  09:36\n  Vii maine?')
+    // A centred row is already held away from the border by its padding.
+    expect(linkBox?.content).toBe('All chats')
   })
 
   it('shows a note bright and without a marker', () => {

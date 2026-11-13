@@ -1094,7 +1094,7 @@ describe('selection marker', () => {
 
     await app.start()
 
-    expect(bridge.lines).toEqual(['Unread (2)', 'Ana Pop  09:36', 'Vii maine? (2)', 'Familia  11.11', 'ok', 'Unanswered', 'All chats'])
+    expect(bridge.lines).toEqual(['Unread (2)', '  Ana Pop  09:36', '  Vii maine? (2)', '  Familia  11.11', '  ok', 'Unanswered', 'All chats'])
     expect(bridge.markers).toEqual([true, false, false, false])
     expect(bridge.brightness).toEqual([4, 2, 2, 2])
   })

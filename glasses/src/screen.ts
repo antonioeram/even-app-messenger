@@ -37,6 +37,7 @@ const BORDER_WIDTH = 1
 // padding must leave the line its full height inside the border, or the
 // firmware treats the box as scrollable.
 const ROW_PADDING = 2
+const ROW_INDENT = '  '
 const CENTERED_PADDING = Math.floor((ROW_HEIGHT - 2 * BORDER_WIDTH - LINE_HEIGHT) / 2)
 
 /**
@@ -139,8 +140,16 @@ const rowTop = (index: number) => HEAD_HEIGHT + index * ROW_PITCH
  * text, in a two-character column that keeps the rows aligned.
  */
 function rowText(row: Row, markers: boolean): string {
-  if (markers || row.note) return row.text
-  return `${row.selected ? '>' : ' '} ${row.text}`
+  if (row.note) return row.text
+  if (!markers) return `${row.selected ? '>' : ' '} ${row.text}`
+  // Two lines leave no room for padding, so spaces keep each of them off the
+  // line that divides the box from the marker cell, about as far as the
+  // padding holds a centred row.
+  if (row.centered) return row.text
+  return row.text
+    .split('\n')
+    .map((line) => `${ROW_INDENT}${line}`)
+    .join('\n')
 }
 
 const rowBright = (row: Row) => row.selected || row.note === true

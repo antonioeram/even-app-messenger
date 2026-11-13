@@ -131,11 +131,11 @@ npx evenhub login
 ```
 
 ```bash
-npx evenhub create messenger-0.8.1.ehpk --name "Messenger" --tagline "Messages from your own server"
+npx evenhub create messenger-0.8.2.ehpk --name "Messenger" --tagline "Messages from your own server"
 ```
 
 ```bash
-npx evenhub promote 0.8.1 --to beta
+npx evenhub promote 0.8.2 --to beta
 ```
 
 ```bash

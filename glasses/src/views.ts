@@ -7,7 +7,7 @@ import type { Chat, Message } from './gateway'
 import { fitText, INBOX_ROWS, type BubbleBox, type Row } from './screen'
 
 /** Longest line in an inbox box; short enough not to wrap in the proportional font. */
-export const INBOX_LINE_CHARS = 43
+export const INBOX_LINE_CHARS = 42
 
 /** Line length used to wrap text inside a bubble; kept conservative for the same reason. */
 export const BUBBLE_LINE_CHARS = 40
