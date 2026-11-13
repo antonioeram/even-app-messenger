@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -192,6 +193,10 @@ type fakeStore struct {
 	gotFilter store.Filter
 	gotOffset int
 	readChat  string
+
+	mu      sync.Mutex
+	seq     int64
+	changed chan struct{}
 }
 
 func (f *fakeStore) SetUnread(_ context.Context, chatID string, unread int) error {
@@ -627,6 +632,26 @@ func TestTranscribeFailureAndMissingTranscriber(t *testing.T) {
 	}
 }
 
+// Changes reports the fake's change number; touch advances it like a new message.
+func (f *fakeStore) Changes() (int64, <-chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.changed == nil {
+		f.changed = make(chan struct{})
+	}
+	return f.seq, f.changed
+}
+
+func (f *fakeStore) touch() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	if f.changed != nil {
+		close(f.changed)
+	}
+	f.changed = make(chan struct{})
+}
+
 func (f *fakeStore) Counts(context.Context) (store.Counts, error) {
 	return store.Counts{Unread: 1, Unanswered: 12, All: 437}, nil
 }
@@ -672,5 +697,69 @@ func TestChatsOffsetIsPassedToTheStore(t *testing.T) {
 		if rec := do(t, h, http.MethodGet, "/chats?offset="+bad, nil); rec.Code != http.StatusBadRequest {
 			t.Errorf("offset=%s: status = %d, want 400", bad, rec.Code)
 		}
+	}
+}
+
+func TestRepliesListsTheTextToSendAndTheTextToShow(t *testing.T) {
+	h := newStoreHandler(config.Config{QuickReplies: []string{"OK", "Ajung în 10 minute"}}, &fakeStore{}, nil)
+	rec := do(t, h, http.MethodGet, "/replies", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	replies := decode(t, rec)["replies"].([]any)
+	if len(replies) != 2 {
+		t.Fatalf("replies = %v", replies)
+	}
+	second := replies[1].(map[string]any)
+	if second["text"] != "Ajung în 10 minute" || second["display"] != "Ajung in 10 minute" {
+		t.Errorf("reply = %v", second)
+	}
+}
+
+func changesHandler(st ChatStore, wait time.Duration) http.Handler {
+	return New(config.Config{CORSOrigins: []string{"*"}}, Options{Version: "test", Store: st, ChangeWait: wait})
+}
+
+func TestChangesAnswersAtOnceWhenTheCallerIsBehind(t *testing.T) {
+	st := &fakeStore{seq: 7}
+	h := changesHandler(st, time.Minute)
+	for _, path := range []string{"/changes", "/changes?since=6"} {
+		if seq := decode(t, do(t, h, http.MethodGet, path, nil))["seq"]; seq != float64(7) {
+			t.Errorf("%s: seq = %v, want 7", path, seq)
+		}
+	}
+	if rec := do(t, h, http.MethodGet, "/changes?since=soon", nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("bad since: status = %d, want 400", rec.Code)
+	}
+}
+
+func TestChangesHoldsTheCallUntilSomethingChanges(t *testing.T) {
+	st := &fakeStore{seq: 7}
+	h := changesHandler(st, time.Minute)
+	done := make(chan float64, 1)
+	go func() {
+		done <- decode(t, do(t, h, http.MethodGet, "/changes?since=7", nil))["seq"].(float64)
+	}()
+	select {
+	case seq := <-done:
+		t.Fatalf("answered %v before any change", seq)
+	case <-time.After(50 * time.Millisecond):
+	}
+	st.touch()
+	select {
+	case seq := <-done:
+		if seq != 8 {
+			t.Errorf("seq = %v, want 8", seq)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no answer after a change")
+	}
+}
+
+func TestChangesGivesTheSameNumberWhenNothingHappened(t *testing.T) {
+	st := &fakeStore{seq: 7}
+	rec := do(t, changesHandler(st, 20*time.Millisecond), http.MethodGet, "/changes?since=7", nil)
+	if seq := decode(t, rec)["seq"]; seq != float64(7) {
+		t.Errorf("seq = %v, want 7", seq)
 	}
 }

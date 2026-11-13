@@ -32,6 +32,9 @@ type Options struct {
 	Transcribe func(ctx context.Context, pcm []byte) (text, lang string, err error)
 	// Location is the time zone of the clock strings; nil means time.Local.
 	Location *time.Location
+	// ChangeWait is how long /changes holds a call with nothing to report;
+	// zero means 25 seconds, which stays under the usual proxy timeouts.
+	ChangeWait time.Duration
 }
 
 // New returns the gateway handler: routes wrapped in logging and CORS.
@@ -45,10 +48,14 @@ func New(cfg config.Config, opts Options) http.Handler {
 	if opts.Location == nil {
 		opts.Location = time.Local
 	}
+	if opts.ChangeWait == 0 {
+		opts.ChangeWait = 25 * time.Second
+	}
 	auth := requireToken(cfg.Token)
 	a := &api{
 		store: opts.Store, link: opts.Link, pair: opts.Pair, sender: opts.Sender, transcribe: opts.Transcribe,
 		now: opts.Now, loc: opts.Location, log: opts.Logger,
+		replies: cfg.QuickReplies, changeWait: opts.ChangeWait,
 	}
 
 	mux := http.NewServeMux()
@@ -57,6 +64,8 @@ func New(cfg config.Config, opts Options) http.Handler {
 	})
 	mux.Handle("GET /chats", auth(http.HandlerFunc(a.chats)))
 	mux.Handle("GET /counts", auth(http.HandlerFunc(a.counts)))
+	mux.Handle("GET /changes", auth(http.HandlerFunc(a.changes)))
+	mux.Handle("GET /replies", auth(http.HandlerFunc(a.quickReplies)))
 	mux.Handle("GET /chats/{id}/messages", auth(http.HandlerFunc(a.messages)))
 	mux.Handle("POST /chats/{id}/read", auth(http.HandlerFunc(a.markRead)))
 	mux.Handle("POST /chats/{id}/send", auth(http.HandlerFunc(a.send)))

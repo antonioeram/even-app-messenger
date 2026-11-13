@@ -17,6 +17,8 @@ services:
       # Speech-to-text server on the home network; empty disables dictation.
       GATEWAY_STT_URL: ${GATEWAY_STT_URL:-}
       GATEWAY_STT_LANGS: ${GATEWAY_STT_LANGS:-ro,en}
+      # Ready-made answers, separated by "|"; empty gives the built-in ones.
+      GATEWAY_QUICK_REPLIES: ${GATEWAY_QUICK_REPLIES:-}
       TZ: ${TZ:-Europe/Bucharest}
     ports:
       # Loopback by default: nginx on the same host is the only client.

@@ -14,6 +14,8 @@ Screenshots are from the Even Hub simulator, with made-up data.
 - **Unanswered and All chats.** Two more lists, opened from the last two rows of the home screen: read chats that still wait for your reply, and every chat. The title shows how many chats a list holds, and a long list loads as you scroll.
 - **Reading.** A chat opens as message bubbles, theirs on the left and yours on the right, each with the sender's name and the time. It opens on the newest page; scroll up for older messages. A `+` after the page count means the server holds more, and scrolling up past the first page loads them.
 - **Voice reply.** Hold the touchpad and speak. The recording is transcribed on your server and the text appears on the glasses. A click sends it; a double click cancels. Nothing is sent without that click.
+- **Quick replies.** A click in a chat lists your ready-made answers. Pick one, and a second click sends it.
+- **Live.** While the app is open, a new message shows up by itself: the gateway tells the app when something changed.
 - **Ring or temple.** All gestures work from the R1 ring and from the temple touchpads.
 
 Email (IMAP/SMTP) is planned and not written yet.
@@ -86,7 +88,7 @@ docker compose up -d --build
 curl -s http://127.0.0.1:8080/health
 ```
 
-The answer is `{"status":"ok","version":"0.8.0"}`.
+The answer is `{"status":"ok","version":"0.9.0"}`.
 
 ### 2. Put HTTPS in front of it
 
@@ -131,11 +133,11 @@ npx evenhub login
 ```
 
 ```bash
-npx evenhub create messenger-0.8.2.ehpk --name "Messenger" --tagline "Messages from your own server"
+npx evenhub create messenger-0.9.0.ehpk --name "Messenger" --tagline "Messages from your own server"
 ```
 
 ```bash
-npx evenhub promote 0.8.2 --to beta
+npx evenhub promote 0.9.0 --to beta
 ```
 
 ```bash
@@ -167,11 +169,14 @@ Then set `GATEWAY_STT_URL=http://<server address>:8770/stt` in `deploy/.env`, se
 | Unread box | Double click | Asks to exit the app |
 | Other boxes | Double click | Back to the Unread box |
 | A chat | Scroll | Older (up) or newer (down) page; up on the first page loads older messages |
-| A chat | Click | Reloads the chat |
+| A chat | Click | Lists the quick replies |
 | A chat | Double click | Back to the box |
 | A chat | Hold | Records a reply; release to stop |
-| Transcript | Click | Sends the reply |
-| Transcript | Double click | Cancels the reply |
+| Quick replies | Scroll, click | Moves the selection; shows the selected reply |
+| Quick replies | Double click | Back to the chat |
+| Quick replies | Hold | Records a reply instead |
+| Reply shown | Click | Sends the reply |
+| Reply shown | Double click | Cancels the reply |
 
 Opening a chat on the glasses removes it from the Unread box. This is local to the gateway: no read receipt is sent, and the phone still shows the chat as unread. Reading or answering on the phone clears it too.
 
@@ -189,6 +194,7 @@ Gateway, in `deploy/.env`:
 | `GATEWAY_WHATSAPP` | `on` | `off` disables the WhatsApp connection |
 | `GATEWAY_STT_URL` | empty | Speech-to-text endpoint; empty disables dictation |
 | `GATEWAY_STT_LANGS` | `ro,en` | Languages you dictate in; the first is the fallback |
+| `GATEWAY_QUICK_REPLIES` | `OK`, `Yes`, `No`, `Thanks`, `On my way`, `I'll call you later` | Ready-made answers, separated by `\|`, at most 12; sent exactly as written |
 | `TZ` | `Europe/Bucharest` | Time zone of the clock next to messages |
 
 The WhatsApp session (`whatsapp.db`) and your messages (`messages.db`) live in the Docker volume `gateway-data`. Treat both as secrets, and back them up.
@@ -222,7 +228,8 @@ Both parts are written test first. [docs/platform-notes.md](docs/platform-notes.
 ## Known limits
 
 - One WhatsApp account, text messages only. Media shows as a label such as `[Photo]` or `[Voice message 0:12]`.
-- No read receipts and no quick replies yet.
+- No read receipts.
+- Live updates need the app open on the glasses; alerts for new messages stay with the phone's own notifications.
 - The gateway does not alert you when the phone unlinks the session.
 - The Even app does not update a beta build by itself; install each new version from Even Hub.
 - Tested on iOS only.

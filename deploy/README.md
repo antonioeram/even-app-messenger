@@ -72,6 +72,8 @@ server {
 
 Nginx Proxy Manager: Proxy Hosts > Add, forward to `http://<gateway address>:8080`, select the certificate, enable "Force SSL", and attach an access list that allows only your LAN and VPN ranges.
 
+The app keeps one call to `/changes` open for up to 25 seconds at a time, to learn about new messages. Keep the proxy read timeout above that; nginx defaults to 60 seconds.
+
 Do not add CORS headers in the proxy. The gateway sends them, and duplicated headers make the WebView reject the answer.
 
 ### Nginx Proxy Manager in Docker on the same host

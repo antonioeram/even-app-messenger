@@ -17,6 +17,7 @@ import {
   type Counts,
   type GatewayClient,
   type Message,
+  type QuickReply,
   type Transcript,
 } from './gateway'
 
@@ -188,6 +189,10 @@ function fakeGateway(
     more?: Chat[][]
     /** What each call for messages older than the loaded ones returns, in order. */
     older?: Message[][]
+    /** The quick replies; none by default, so a click in a chat reloads it. */
+    replies?: Step<QuickReply[]>
+    /** Failures of the calls that wait for a change, in order; then they wait. */
+    changeFailures?: GatewayError[]
     sends?: (GatewayError | undefined)[]
   } = {},
 ) {
@@ -198,6 +203,29 @@ function fakeGateway(
     filters: [] as (string | undefined)[],
     messageCalls: [] as string[],
     readCalls: [] as string[],
+    replyCalls: 0,
+    async replies(): Promise<QuickReply[]> {
+      gateway.replyCalls += 1
+      if (options.replies instanceof GatewayError) throw options.replies
+      return options.replies ?? []
+    },
+    /** The since value of each call that asked about changes. */
+    sinces: [] as (number | undefined)[],
+    seq: 1,
+    waiting: [] as ((seq: number) => void)[],
+    async changes(since?: number): Promise<number> {
+      gateway.sinces.push(since)
+      const failure = options.changeFailures?.shift()
+      if (failure) throw failure
+      if (since !== gateway.seq) return gateway.seq
+      // Held until something changes, like the long poll of the real gateway.
+      return new Promise((resolve) => gateway.waiting.push(resolve))
+    },
+    /** Something changed on the gateway: the held call answers. */
+    notify() {
+      gateway.seq += 1
+      for (const resolve of gateway.waiting.splice(0)) resolve(gateway.seq)
+    },
     countCalls: 0,
     async counts(): Promise<Counts> {
       gateway.countCalls += 1
@@ -282,6 +310,12 @@ const ringDoubleClick: EvenHubEvent = {
   }),
 }
 
+/** Lets the watcher see an answer from the gateway, then waits for the reload it starts. */
+async function settle(app: { idle(): Promise<void> }) {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await app.idle()
+}
+
 /** A stand-in for the canvas: one byte that says whether the marker is lit. */
 const renderMarker = async (lit: boolean) => new Uint8Array([lit ? 1 : 0])
 
@@ -294,6 +328,7 @@ function setup(gateway: GatewayClient = fakeGateway(), options: { markers?: bool
     gateway,
     gatewayUrl: 'https://gw.example',
     log: (line) => logs.push(line),
+    watchRetryMs: 1,
     ...(options.markers ? { renderMarker } : {}),
   })
   return { bridge, app, logs }
@@ -1208,5 +1243,248 @@ describe('older messages', () => {
     expect(gateway.olderCalls).toEqual(['m100'])
     expect(bridge.lines[0]).toMatch(/^Ana Pop 1\/\d+$/)
     expect(bridge.text).toContain('message number 100')
+  })
+})
+
+describe('quick replies', () => {
+  const replies: QuickReply[] = [
+    { text: 'OK', display: 'OK' },
+    { text: 'Mulțumesc', display: 'Multumesc' },
+    { text: 'Ajung în 10 minute', display: 'Ajung in 10 minute' },
+    { text: 'Te sun eu', display: 'Te sun eu' },
+    { text: 'Nu pot acum', display: 'Nu pot acum' },
+  ]
+
+  async function openMenu(gateway = fakeGateway({ replies })) {
+    const context = await openChat(0, gateway)
+    context.bridge.emit(click)
+    await context.app.idle()
+    return context
+  }
+
+  it('lists the replies on click, a screenful at a time, with the first one selected', async () => {
+    const { bridge } = await openMenu()
+
+    expect(bridge.lines).toEqual(['Reply to Ana Pop', '> OK', '  Multumesc', '  Ajung in 10 minute', '  Te sun eu'])
+  })
+
+  it('moves the selection on scroll and shows the next screenful', async () => {
+    const { bridge, app } = await openMenu()
+
+    for (let i = 0; i < 4; i += 1) bridge.emit(scrollDown)
+    await app.idle()
+
+    expect(bridge.lines).toEqual(['Reply to Ana Pop', '> Nu pot acum'])
+  })
+
+  it('shows the chosen reply and waits: nothing is sent without a second click', async () => {
+    const gateway = fakeGateway({ replies })
+    const { bridge, app } = await openMenu(gateway)
+    bridge.emit(scrollDown)
+
+    bridge.emit(click)
+    await app.idle()
+
+    expect(bridge.text).toContain('Multumesc')
+    expect(bridge.text).toContain('Click = send')
+    expect(gateway.sent).toEqual([])
+  })
+
+  it('sends the reply as written, with diacritics, on the second click and shows the chat again', async () => {
+    const gateway = fakeGateway({ replies, messages: [[message('Buna')], [message('Buna'), message('Multumesc', { fromMe: true })]] })
+    const { bridge, app } = await openMenu(gateway)
+    bridge.emit(scrollDown)
+    bridge.emit(click)
+    await app.idle()
+
+    bridge.emit(click)
+    await app.idle()
+
+    expect(gateway.sent).toEqual([{ chatId: 'ana@s.whatsapp.net', text: 'Mulțumesc' }])
+    expect(bridge.lines[0]).toBe('Ana Pop 1/1')
+  })
+
+  it('goes back to the chat on double click, from the list and from the confirmation, without sending', async () => {
+    const gateway = fakeGateway({ replies })
+    const { bridge, app } = await openMenu(gateway)
+
+    bridge.emit(doubleClick)
+    await app.idle()
+    expect(bridge.lines[0]).toBe('Ana Pop 1/1')
+
+    bridge.emit(click)
+    await app.idle()
+    bridge.emit(click)
+    await app.idle()
+    bridge.emit(doubleClick)
+    await app.idle()
+    expect(bridge.lines[0]).toBe('Ana Pop 1/1')
+    expect(gateway.sent).toEqual([])
+  })
+
+  it('asks the gateway for the replies once', async () => {
+    const gateway = fakeGateway({ replies })
+    const { bridge, app } = await openMenu(gateway)
+    bridge.emit(doubleClick)
+    await app.idle()
+
+    bridge.emit(click)
+    await app.idle()
+
+    expect(gateway.replyCalls).toBe(1)
+    expect(bridge.lines[0]).toBe('Reply to Ana Pop')
+  })
+
+  it('records a voice reply when the touchpad is held on the list', async () => {
+    const { bridge, app } = await openMenu()
+
+    bridge.emit(holdStart)
+    await app.idle()
+
+    expect(bridge.mic).toEqual([true])
+    expect(bridge.text).toContain('Speak now')
+  })
+
+  it('reloads the chat on click when the gateway has no replies to offer', async () => {
+    const gateway = fakeGateway({ replies: new GatewayError('http', 'HTTP 404') })
+    const { bridge, app } = await openChat(0, gateway)
+
+    bridge.emit(click)
+    await app.idle()
+
+    expect(gateway.messageCalls).toHaveLength(2)
+    expect(bridge.lines[0]).toBe('Ana Pop 1/1')
+  })
+})
+
+describe('live updates', () => {
+  it('reloads the list when the gateway reports a change', async () => {
+    const gateway = fakeGateway({ chats: [[ana, family], [family, ana]] })
+    const { bridge, app } = setup(gateway)
+    await app.start()
+    await settle(app)
+    expect(bridge.lines[1]).toBe('> Ana Pop  09:36')
+    const rebuilds = bridge.rebuilds
+
+    gateway.notify()
+    await settle(app)
+
+    // The other chat moved to the top; the selection stays on the chat it was on,
+    // and the same boxes are reused.
+    expect(bridge.lines.slice(1, 4)).toEqual(['  Familia  11.11', 'ok', '> Ana Pop  09:36'])
+    expect(bridge.rebuilds).toBe(rebuilds)
+    // It waits again, from the number it was just given.
+    expect(gateway.sinces).toEqual([undefined, 1, 2])
+  })
+
+  it('keeps the selection on a link row when the list reloads', async () => {
+    const gateway = fakeGateway()
+    const { bridge, app } = setup(gateway)
+    await app.start()
+    await settle(app)
+    bridge.emit(scrollDown)
+    bridge.emit(scrollDown)
+    await app.idle()
+    expect(bridge.lines.at(-2)).toBe('> Unanswered')
+
+    gateway.notify()
+    await settle(app)
+
+    expect(bridge.lines.at(-2)).toBe('> Unanswered')
+  })
+
+  it('leaves a long list alone while the selection is past its first page', async () => {
+    const chat = (i: number): Chat => ({ ...family, id: `c${i}@s.whatsapp.net`, name: `Chat ${i}` })
+    const first = Array.from({ length: 20 }, (_, i) => chat(i))
+    const gateway = fakeGateway({ chats: [first], counts: { unread: 40, unanswered: 0, all: 40 }, more: [[chat(20), chat(21)]] })
+    const { bridge, app } = setup(gateway)
+    await app.start()
+    await settle(app)
+    for (let i = 0; i < 20; i += 1) bridge.emit(scrollDown)
+    await app.idle()
+    const calls = gateway.chatCalls
+
+    gateway.notify()
+    await settle(app)
+
+    expect(gateway.chatCalls).toBe(calls)
+    expect(bridge.text).toContain('> Chat 20')
+  })
+
+  it('shows a new message in the open chat', async () => {
+    const gateway = fakeGateway({ messages: [[message('first')], [message('first'), message('second')]] })
+    const { bridge, app } = await openChat(0, gateway)
+    await settle(app)
+
+    gateway.notify()
+    await settle(app)
+
+    expect(bridge.text).toContain('second')
+  })
+
+  it('does not redraw the open chat when the change was elsewhere', async () => {
+    const gateway = fakeGateway({ messages: [[message('first')]] })
+    const { bridge, app } = await openChat(0, gateway)
+    await settle(app)
+    const rebuilds = bridge.rebuilds
+
+    gateway.notify()
+    await settle(app)
+
+    expect(gateway.messageCalls).toHaveLength(2)
+    expect(bridge.rebuilds).toBe(rebuilds)
+  })
+
+  it('does not pull the reader back from an older page', async () => {
+    const many = Array.from({ length: 20 }, (_, i) => message(`message number ${i}`))
+    const gateway = fakeGateway({ messages: [many] })
+    const { bridge, app } = await openChat(0, gateway)
+    await settle(app)
+    bridge.emit(scrollUp)
+    await app.idle()
+
+    gateway.notify()
+    await settle(app)
+
+    expect(bridge.lines[0]).toBe('Ana Pop 6/7')
+    expect(gateway.messageCalls).toHaveLength(1)
+  })
+
+  it('does not replace a reply in progress', async () => {
+    const gateway = fakeGateway()
+    const { bridge, app } = await openChat(0, gateway)
+    await settle(app)
+    bridge.emit(holdStart)
+    await app.idle()
+
+    gateway.notify()
+    await settle(app)
+
+    expect(bridge.text).toContain('Speak now')
+    expect(gateway.messageCalls).toHaveLength(1)
+  })
+
+  it('keeps watching after a call fails', async () => {
+    const gateway = fakeGateway({ chats: [[ana], [family, ana]], changeFailures: [new GatewayError('network', 'Load failed')] })
+    const { bridge, app, logs } = setup(gateway)
+    await app.start()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await app.idle()
+
+    gateway.notify()
+    await settle(app)
+
+    expect(bridge.text).toContain('Familia')
+    expect(logs.join('\n')).not.toContain('live updates off')
+  })
+
+  it('stops watching a gateway that has no change feed', async () => {
+    const gateway = fakeGateway({ changeFailures: [new GatewayError('http', 'HTTP 404')] })
+    const { app, logs } = setup(gateway)
+    await app.start()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(gateway.sinces).toEqual([undefined])
+    expect(logs.join('\n')).toContain('live updates off')
   })
 })

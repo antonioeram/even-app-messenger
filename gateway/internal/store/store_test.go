@@ -412,3 +412,46 @@ func TestOpenRepairsPreviewsThatDifferFromTheNewestMessage(t *testing.T) {
 		t.Errorf("chat after repair = %+v", chats[0])
 	}
 }
+
+func TestChangesAdvanceOnNewMessagesAndUnreadCounts(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	seq := func() int64 { n, _ := s.Changes(); return n }
+
+	start := seq()
+	s.SaveMessage(ctx, msg("a", "m1", 0, "x"))
+	afterMessage := seq()
+	if afterMessage == start {
+		t.Error("a new message did not advance the change number")
+	}
+	s.SaveMessage(ctx, msg("a", "m1", 0, "x"))
+	if seq() != afterMessage {
+		t.Error("a message that was already stored advanced the change number")
+	}
+	s.SetUnread(ctx, "a", 2)
+	afterUnread := seq()
+	if afterUnread == afterMessage {
+		t.Error("a new unread count did not advance the change number")
+	}
+	s.SetUnread(ctx, "a", 2)
+	s.AddUnread(ctx, "a", 0)
+	s.UpsertChat(ctx, Chat{ID: "a", Name: "Ana"})
+	if seq() != afterUnread {
+		t.Error("writes that changed nothing on screen advanced the change number")
+	}
+}
+
+func TestChangesWakeWhoeverWaits(t *testing.T) {
+	s, ctx := open(t), context.Background()
+	_, changed := s.Changes()
+	select {
+	case <-changed:
+		t.Fatal("the channel is closed before any change")
+	default:
+	}
+	s.SaveMessage(ctx, msg("a", "m1", 0, "x"))
+	select {
+	case <-changed:
+	case <-time.After(time.Second):
+		t.Fatal("the channel was not closed by a new message")
+	}
+}

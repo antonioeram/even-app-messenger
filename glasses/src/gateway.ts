@@ -55,6 +55,14 @@ export interface Transcript {
   lang: string
 }
 
+/** A ready-made answer. */
+export interface QuickReply {
+  /** What gets sent. */
+  text: string
+  /** The same text in ASCII, for the glasses. */
+  display: string
+}
+
 /** Number of chats in each box. */
 export interface Counts {
   unread: number
@@ -73,14 +81,23 @@ export interface GatewayClient {
   /** pcm: 16 kHz, 16 bit, mono, little endian. */
   transcribe(pcm: Uint8Array): Promise<Transcript>
   send(chatId: string, text: string): Promise<void>
+  replies(): Promise<QuickReply[]>
+  /**
+   * The number of the latest change on the gateway. With since, the call is
+   * held until that number differs from since or the gateway gives up waiting,
+   * so the same number back means that nothing happened.
+   */
+  changes(since?: number): Promise<number>
 }
 
-// Chats are loaded a page at a time, as the selection moves down the list.
-const CHAT_LIMIT = 20
+/** Chats are loaded a page of this size at a time, as the selection moves down the list. */
+export const CHAT_LIMIT = 20
 /** Messages in one answer; a shorter answer means the chat has nothing older. */
 export const MESSAGE_LIMIT = 30
 const TRANSCRIBE_TIMEOUT_MS = 45_000
 const SEND_TIMEOUT_MS = 20_000
+// The gateway holds a call for changes up to 25 seconds.
+const CHANGES_TIMEOUT_MS = 40_000
 
 export interface GatewayClientOptions {
   baseUrl: string
@@ -95,15 +112,16 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
   const fetchFn = options.fetchFn ?? ((input, init) => fetch(input, init))
   const timeoutMs = options.timeoutMs ?? 8000
 
-  interface Post {
-    body: BodyInit
-    contentType: string
-    /** Speech-to-text takes longer than a read. */
+  interface Call {
+    /** Sent as a POST when present. */
+    body?: BodyInit
+    contentType?: string
+    /** Speech-to-text and the wait for changes take longer than a read. */
     timeoutMs?: number
   }
 
-  async function getJson(path: string, post?: Post): Promise<unknown> {
-    const limitMs = post?.timeoutMs ?? timeoutMs
+  async function getJson(path: string, call: Call = {}): Promise<unknown> {
+    const limitMs = call.timeoutMs ?? timeoutMs
     const controller = new AbortController()
     let timedOut = false
     const timer = setTimeout(() => {
@@ -114,10 +132,10 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
     const headers: Record<string, string> = { Accept: 'application/json' }
     if (options.token) headers.Authorization = `Bearer ${options.token}`
     const init: RequestInit = { headers, signal: controller.signal, cache: 'no-store' }
-    if (post) {
-      headers['Content-Type'] = post.contentType
+    if (call.body !== undefined) {
+      if (call.contentType) headers['Content-Type'] = call.contentType
       init.method = 'POST'
-      init.body = post.body
+      init.body = call.body
     }
 
     let response: Response
@@ -197,6 +215,26 @@ export function createGatewayClient(options: GatewayClientOptions): GatewayClien
         throw new GatewayError('invalid', 'response has no text')
       }
       return { text: body.text, display: text(body.display) || body.text, lang: text(body.lang) }
+    },
+
+    async replies() {
+      const body = await getJson('/replies')
+      if (!isRecord(body) || !Array.isArray(body.replies)) {
+        throw new GatewayError('invalid', 'response has no replies list')
+      }
+      return body.replies
+        .filter((raw): raw is Record<string, unknown> => isRecord(raw) && typeof raw.text === 'string' && raw.text !== '')
+        .map((raw) => ({ text: text(raw.text), display: text(raw.display) || text(raw.text) }))
+    },
+
+    async changes(since) {
+      const body = await getJson(since === undefined ? '/changes' : `/changes?since=${since}`, {
+        timeoutMs: CHANGES_TIMEOUT_MS,
+      })
+      if (!isRecord(body) || typeof body.seq !== 'number') {
+        throw new GatewayError('invalid', 'response has no change number')
+      }
+      return body.seq
     },
 
     async send(chatId, message) {

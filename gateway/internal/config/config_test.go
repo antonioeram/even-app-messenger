@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -92,5 +93,31 @@ func TestLoadSpeechToText(t *testing.T) {
 	}
 	if _, err := Load(env(map[string]string{"GATEWAY_STT_URL": "192.168.1.50:8770"})); err == nil {
 		t.Error("a URL without scheme was accepted")
+	}
+}
+
+func TestLoadQuickReplies(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil || len(cfg.QuickReplies) == 0 || cfg.QuickReplies[0] != "OK" {
+		t.Fatalf("default replies = %v, err = %v", cfg.QuickReplies, err)
+	}
+	cfg, err = Load(env(map[string]string{"GATEWAY_QUICK_REPLIES": " Da | Nu, mulțumesc ||Ajung în 10 minute "}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Da", "Nu, mulțumesc", "Ajung în 10 minute"}
+	if len(cfg.QuickReplies) != len(want) {
+		t.Fatalf("replies = %q, want %q", cfg.QuickReplies, want)
+	}
+	for i := range want {
+		if cfg.QuickReplies[i] != want[i] {
+			t.Errorf("reply %d = %q, want %q", i, cfg.QuickReplies[i], want[i])
+		}
+	}
+	if _, err := Load(env(map[string]string{"GATEWAY_QUICK_REPLIES": strings.Repeat("a|", 13)})); err == nil {
+		t.Error("13 replies accepted, want an error")
+	}
+	if _, err := Load(env(map[string]string{"GATEWAY_QUICK_REPLIES": strings.Repeat("a", 201)})); err == nil {
+		t.Error("a reply of 201 characters accepted, want an error")
 	}
 }

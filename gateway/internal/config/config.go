@@ -26,6 +26,8 @@ type Config struct {
 	// STTLanguages are the languages the user dictates in; the first one is
 	// used when detection picks something else.
 	STTLanguages []string
+	// QuickReplies are the ready-made answers offered on the glasses.
+	QuickReplies []string
 }
 
 // Load reads the configuration through getenv (os.Getenv in production).
@@ -43,6 +45,11 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("GATEWAY_STT_URL: want an http(s) URL, got %q", cfg.STTURL)
 		}
 	}
+	replies, err := quickReplies(getenv("GATEWAY_QUICK_REPLIES"))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.QuickReplies = replies
 	cfg.WhatsApp = cfg.DataDir != "" && !strings.EqualFold(strings.TrimSpace(getenv("GATEWAY_WHATSAPP")), "off")
 	for _, origin := range cfg.CORSOrigins {
 		if err := validateOrigin(origin); err != nil {
@@ -50,6 +57,37 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// Limits of the quick replies: what a short menu on the glasses can hold.
+const (
+	maxQuickReplies     = 12
+	maxQuickReplyLength = 200
+)
+
+var defaultQuickReplies = []string{"OK", "Yes", "No", "Thanks", "On my way", "I'll call you later"}
+
+// quickReplies reads the answers, separated by "|"; an empty value gives the
+// defaults.
+func quickReplies(value string) ([]string, error) {
+	var replies []string
+	for _, reply := range strings.Split(value, "|") {
+		if reply = strings.TrimSpace(reply); reply != "" {
+			replies = append(replies, reply)
+		}
+	}
+	if len(replies) == 0 {
+		return defaultQuickReplies, nil
+	}
+	if len(replies) > maxQuickReplies {
+		return nil, fmt.Errorf("GATEWAY_QUICK_REPLIES: at most %d replies, got %d", maxQuickReplies, len(replies))
+	}
+	for _, reply := range replies {
+		if len([]rune(reply)) > maxQuickReplyLength {
+			return nil, fmt.Errorf("GATEWAY_QUICK_REPLIES: a reply has more than %d characters", maxQuickReplyLength)
+		}
+	}
+	return replies, nil
 }
 
 func valueOr(value, fallback string) string {

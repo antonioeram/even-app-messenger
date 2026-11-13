@@ -25,6 +25,8 @@ type ChatStore interface {
 	Counts(ctx context.Context) (store.Counts, error)
 	Chat(ctx context.Context, id string) (store.Chat, bool, error)
 	Messages(ctx context.Context, chatID string, limit int, before store.Cursor) ([]store.Message, error)
+	// Changes returns the number of the latest change and a channel closed at the next one.
+	Changes() (int64, <-chan struct{})
 }
 
 // Sender delivers a text message to an existing chat.
@@ -86,6 +88,10 @@ type api struct {
 	log        *slog.Logger
 	now        func() time.Time
 	loc        *time.Location
+	// replies are the quick replies offered on the glasses.
+	replies []string
+	// changeWait is how long /changes holds a call that has nothing to report.
+	changeWait time.Duration
 }
 
 func (a *api) chats(w http.ResponseWriter, r *http.Request) {
@@ -127,6 +133,53 @@ func (a *api) chats(w http.ResponseWriter, r *http.Request) {
 		out = append(out, a.chatJSON(c))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"chats": out})
+}
+
+// quickReplies lists the ready-made answers: the text to send and the same
+// text in ASCII for the glasses.
+func (a *api) quickReplies(w http.ResponseWriter, _ *http.Request) {
+	type reply struct {
+		Text    string `json:"text"`
+		Display string `json:"display"`
+	}
+	out := make([]reply, 0, len(a.replies))
+	for _, text := range a.replies {
+		out = append(out, reply{Text: text, Display: displayText(text)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"replies": out})
+}
+
+// changes tells the glasses when to reload. It answers at once with the
+// number of the latest change when that differs from since; otherwise it
+// holds the call until something changes or changeWait passes.
+func (a *api) changes(w http.ResponseWriter, r *http.Request) {
+	if a.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "message store is not configured")
+		return
+	}
+	raw := r.URL.Query().Get("since")
+	since, err := strconv.ParseInt(raw, 10, 64)
+	if raw != "" && err != nil {
+		writeError(w, http.StatusBadRequest, "since must be a number")
+		return
+	}
+	timeout := time.NewTimer(a.changeWait)
+	defer timeout.Stop()
+	for {
+		seq, changed := a.store.Changes()
+		if raw == "" || seq != since {
+			writeJSON(w, http.StatusOK, map[string]int64{"seq": seq})
+			return
+		}
+		select {
+		case <-changed:
+		case <-timeout.C:
+			writeJSON(w, http.StatusOK, map[string]int64{"seq": seq})
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 // counts reports how many chats each box holds, for the labels on the glasses.

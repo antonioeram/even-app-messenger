@@ -158,6 +158,36 @@ describe('gateway client', () => {
     )
   })
 
+  it('reads the quick replies: what is sent and what is shown', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ replies: [{ text: 'Mulțumesc', display: 'Multumesc' }, { text: 'OK' }] }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    const replies = await client.replies()
+
+    expect(calls[0]?.url).toBe('https://gw.example/replies')
+    expect(replies).toEqual([
+      { text: 'Mulțumesc', display: 'Multumesc' },
+      { text: 'OK', display: 'OK' },
+    ])
+  })
+
+  it('asks for the number of the latest change, then waits for one after it', async () => {
+    const { fetchFn, calls } = fakeFetch(() => json({ seq: 42 }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    expect(await client.changes()).toBe(42)
+    expect(await client.changes(42)).toBe(42)
+
+    expect(calls.map((call) => call.url)).toEqual(['https://gw.example/changes', 'https://gw.example/changes?since=42'])
+  })
+
+  it('rejects a /changes response without a number', async () => {
+    const { fetchFn } = fakeFetch(() => json({ seq: 'soon' }))
+    const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })
+
+    expect((await failure(client.changes())).kind).toBe('invalid')
+  })
+
   it('reports an unknown chat as an http error', async () => {
     const { fetchFn } = fakeFetch(() => json({ error: 'unknown chat' }, 404))
     const client = createGatewayClient({ baseUrl: 'https://gw.example', fetchFn })

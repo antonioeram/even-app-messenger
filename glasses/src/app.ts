@@ -10,10 +10,13 @@
 // Unanswered: read chats waiting for my reply; double click goes home.
 // All chats:  every chat; double click goes home.
 // Chat:       opens on the newest page; scroll turns pages and, past the
-//             first one, loads older messages; click reloads; double click
-//             goes back to the box it was opened from. Holding the touchpad
-//             records a reply; releasing it transcribes; the text is sent
-//             only after a click.
+//             first one, loads older messages; double click goes back to
+//             the box it was opened from. Click lists the quick replies;
+//             holding the touchpad records a reply and releasing it
+//             transcribes. Either way the text is sent only after a click.
+//
+// While the app runs it waits for changes on the gateway and reloads what is
+// on screen, so a new message shows up by itself.
 
 import {
   AudioInputSource,
@@ -27,14 +30,17 @@ import {
   type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
 import {
+  CHAT_LIMIT,
   GatewayError,
   MESSAGE_LIMIT,
   type Chat,
   type ChatFilter,
+  type Conversation,
   type Counts,
   type GatewayClient,
   type GatewayErrorKind,
   type Message,
+  type QuickReply,
 } from './gateway'
 import { gestureFromEvent, sourceFromEvent } from './gestures'
 import {
@@ -79,6 +85,8 @@ export interface AppOptions {
    * encoded. Without it the selected row is marked in its text.
    */
   renderMarker?: (lit: boolean) => Promise<Uint8Array>
+  /** Pause before asking for changes again after a failed call; 5 seconds by default. */
+  watchRetryMs?: number
 }
 
 export interface App {
@@ -115,11 +123,14 @@ const BYTES_PER_SECOND = 32_000
 const MIN_RECORDING_BYTES = BYTES_PER_SECOND / 2
 const MAX_RECORDING_MS = 60_000
 const CONFIRM_HINT = 'Click = send | Double click = cancel'
+const WATCH_RETRY_MS = 5000
 
 /** A reply in progress inside a chat. */
 type Reply =
+  /** The quick replies are listed; cursor is the selected one. */
+  | { phase: 'pick'; options: QuickReply[]; cursor: number }
   | { phase: 'recording'; chunks: Uint8Array[]; timer: ReturnType<typeof setTimeout> }
-  /** The transcript is on the glasses, waiting for click (send) or double click (cancel). */
+  /** The text is on the glasses, waiting for click (send) or double click (cancel). */
   | { phase: 'confirm'; text: string; display: string }
   /** A note is shown (nothing recorded, nothing understood, failure); any click returns to the chat. */
   | { phase: 'notice' }
@@ -153,6 +164,8 @@ export function createApp(options: AppOptions): App {
   let loading: Promise<void> | null = null
   /** The chat to select when the inbox is shown again. */
   let selectedId: string | null = null
+  /** The quick replies, once the gateway gave them. */
+  let quickReplies: QuickReply[] | null = null
 
   function track<T>(promise: Promise<T>): Promise<T> {
     pending.add(promise)
@@ -339,7 +352,14 @@ export function createApp(options: AppOptions): App {
         const [chats, counts] = await Promise.all([gateway.chats(BOX_FILTER[box]), gateway.counts().catch(() => null)])
         const links = box === HOME ? HOME_LINKS.map((link) => BOX_TITLE[link]) : []
         const total = Math.max(chats.length, counts ? counts[BOX_COUNT[box]] : 0)
-        const cursor = Math.max(0, chats.findIndex((chat) => chat.id === selectedId))
+        // A reload keeps the selection: on the same chat, or on the same link.
+        const link = screen.name === 'inbox' && screen.box === box ? screen.cursor - screen.chats.length : -1
+        const cursor =
+          link >= 0 && link < links.length
+            ? chats.length + link
+            : Math.max(0, chats.findIndex((chat) => chat.id === selectedId))
+        // Remembered from the start, so a chat that arrives above does not take the selection.
+        selectedId = chats[cursor]?.id ?? null
         screen = { name: 'inbox', box, chats, total, cursor, links }
         await drawInbox(screen)
         log(`${box}: ${chats.length} chats`)
@@ -354,21 +374,25 @@ export function createApp(options: AppOptions): App {
     return load(() => loadChat(box, chat))
   }
 
+  /** Shows a conversation on its newest page and marks it read. */
+  async function showConversation(box: Box, conversation: Conversation): Promise<void> {
+    const { chat, messages } = conversation
+    const pages = chatBubbles(messages)
+    // A full answer may have left older messages behind. The last page holds the newest ones.
+    const more = messages.length >= MESSAGE_LIMIT
+    screen = { name: 'chat', box, chat, messages, more, pages, page: Math.max(0, pages.length - 1) }
+    await showChat()
+    log(`chat: ${messages.length} messages, ${pages.length} pages`)
+    if (chat.unread > 0) {
+      // Read on the glasses: it leaves the Unread box. WhatsApp is not told.
+      await gateway.markRead(chat.id).catch((error) => log(`mark read failed: ${describeError(error).detail}`))
+    }
+  }
+
   async function loadChat(box: Box, chat: Chat): Promise<void> {
     screen = { name: 'chat', box, chat, messages: [], more: false, pages: [], page: 0 }
     try {
-      const conversation = await gateway.messages(chat.id)
-      const { messages } = conversation
-      const pages = chatBubbles(messages)
-      // A full answer may have left older messages behind. The last page holds the newest ones.
-      const more = messages.length >= MESSAGE_LIMIT
-      screen = { name: 'chat', box, chat: conversation.chat, messages, more, pages, page: Math.max(0, pages.length - 1) }
-      await showChat()
-      log(`chat: ${messages.length} messages, ${pages.length} pages`)
-      if (conversation.chat.unread > 0) {
-        // Read on the glasses: it leaves the Unread box. WhatsApp is not told.
-        await gateway.markRead(chat.id).catch((error) => log(`mark read failed: ${describeError(error).detail}`))
-      }
+      await showConversation(box, await gateway.messages(chat.id))
     } catch (error) {
       await showFailure(error, CHAT_HINT)
     }
@@ -417,6 +441,12 @@ export function createApp(options: AppOptions): App {
       selectedId = screen.chats[cursor]?.id ?? null
       void track(drawInbox(screen))
       if (cursor >= screen.chats.length - 1) loadMore()
+    } else if (screen.name === 'chat' && screen.reply?.phase === 'pick') {
+      const { options } = screen.reply
+      const cursor = Math.max(0, Math.min(options.length - 1, screen.reply.cursor + step))
+      if (cursor === screen.reply.cursor) return
+      screen = { ...screen, reply: { ...screen.reply, cursor } }
+      void track(showQuickReplies())
     } else if (screen.name === 'chat' && !screen.reply) {
       const page = Math.max(0, Math.min(screen.pages.length - 1, screen.page + step))
       if (page === screen.page) {
@@ -447,9 +477,52 @@ export function createApp(options: AppOptions): App {
       case 'chat':
         if (screen.reply?.phase === 'confirm') void sendReply(screen.reply)
         else if (screen.reply?.phase === 'notice') void closeReply()
-        else if (!screen.reply) void openChat(screen.box, screen.chat)
+        else if (screen.reply?.phase === 'pick') confirmQuickReply(screen.reply)
+        else if (!screen.reply) void openQuickReplies()
         return
     }
+  }
+
+  /** Draws the list of quick replies of the open chat. */
+  function showQuickReplies(): Promise<void> {
+    if (screen.name !== 'chat' || screen.reply?.phase !== 'pick') return Promise.resolve()
+    const { options, cursor } = screen.reply
+    const rows = inboxRows(
+      [],
+      cursor,
+      options.map((option) => option.display),
+    )
+    return showInbox(`Reply to ${screen.chat.name}`, rows)
+  }
+
+  /** Click in a chat: lists the quick replies. A gateway that offers none gets the chat reloaded instead. */
+  function openQuickReplies(): Promise<void> {
+    if (screen.name !== 'chat') return Promise.resolve()
+    const { box, chat } = screen
+    return load(async () => {
+      if (!quickReplies) {
+        try {
+          quickReplies = await gateway.replies()
+        } catch (error) {
+          log(`quick replies not loaded: ${describeError(error).detail}`)
+        }
+      }
+      if (screen.name !== 'chat' || screen.chat.id !== chat.id || screen.reply) return
+      if (!quickReplies || quickReplies.length === 0) {
+        await loadChat(box, chat)
+        return
+      }
+      screen = { ...screen, reply: { phase: 'pick', options: quickReplies, cursor: 0 } }
+      await showQuickReplies()
+    })
+  }
+
+  /** Click on a quick reply: shows it and waits for the click that sends it. */
+  function confirmQuickReply(reply: Extract<Reply, { phase: 'pick' }>): void {
+    const option = reply.options[reply.cursor]
+    if (screen.name !== 'chat' || !option) return
+    screen = { ...screen, reply: { phase: 'confirm', text: option.text, display: option.display } }
+    void track(showPage(notePage(`Reply to ${screen.chat.name}`, `${option.display}\n\n${CONFIRM_HINT}`)))
   }
 
   /** Shows the page of the chat again and drops any reply in progress. */
@@ -468,7 +541,8 @@ export function createApp(options: AppOptions): App {
 
   function startRecording(): void {
     if (screen.name !== 'chat' || loading) return
-    if (screen.reply && screen.reply.phase !== 'notice') return
+    // A hold starts a recording from the chat, from a note and from the list of quick replies.
+    if (screen.reply && screen.reply.phase !== 'notice' && screen.reply.phase !== 'pick') return
     const timer = setTimeout(stopRecording, MAX_RECORDING_MS)
     screen = { ...screen, reply: { phase: 'recording', chunks: [], timer } }
     void track(
@@ -553,6 +627,68 @@ export function createApp(options: AppOptions): App {
     })
   }
 
+  /** A reload that a change asked for while a gateway call was running. */
+  let refreshWaiting = false
+
+  /** Something changed on the gateway: reloads what is on screen, unless that would disturb the reader. */
+  function refresh(): void {
+    if (loading) {
+      if (!refreshWaiting) {
+        refreshWaiting = true
+        const again = () => {
+          refreshWaiting = false
+          refresh()
+        }
+        loading.then(again, again)
+      }
+      return
+    }
+    if (screen.name === 'inboxText') {
+      void openInbox(screen.box)
+    } else if (screen.name === 'inbox') {
+      // A reload brings the first page only; further down the list it would move the selection away.
+      if (screen.cursor < CHAT_LIMIT) void openInbox(screen.box)
+    } else if (!screen.reply && screen.pages.length > 0 && screen.page === screen.pages.length - 1) {
+      // Only on the newest page: an older one is being read, a reply is being written.
+      void refreshChat()
+    }
+  }
+
+  /** Reloads the open chat and redraws it only when its newest message is another one. */
+  function refreshChat(): Promise<void> {
+    if (screen.name !== 'chat') return Promise.resolve()
+    const { box, chat } = screen
+    return load(async () => {
+      try {
+        const conversation = await gateway.messages(chat.id)
+        if (screen.name !== 'chat' || screen.chat.id !== chat.id || screen.reply) return
+        if (conversation.messages.at(-1)?.id === screen.messages.at(-1)?.id) return
+        await showConversation(box, conversation)
+      } catch (error) {
+        log(`live update failed: ${describeError(error).detail}`)
+      }
+    })
+  }
+
+  /** Waits for changes on the gateway, for as long as the app runs. */
+  async function watch(): Promise<void> {
+    let seq: number | undefined
+    for (;;) {
+      try {
+        const next = await gateway.changes(seq)
+        if (seq !== undefined && next !== seq) refresh()
+        seq = next
+      } catch (error) {
+        // A gateway without the change feed, or one that refuses the token, will not start answering.
+        if (error instanceof GatewayError && (error.kind === 'http' || error.kind === 'unauthorized')) {
+          log(`live updates off: ${error.message}`)
+          return
+        }
+        await new Promise((resolve) => setTimeout(resolve, options.watchRetryMs ?? WATCH_RETRY_MS))
+      }
+    }
+  }
+
   function onDoubleClick(): void {
     if (screen.name === 'chat' && screen.reply) {
       if (screen.reply.phase === 'recording') cancelRecording()
@@ -626,6 +762,7 @@ export function createApp(options: AppOptions): App {
       inboxShown = { title: 'Messenger', rows, markers: markersOn }
       bridge.onEvenHubEvent(onEvent)
       await openInbox(HOME)
+      void watch()
     },
 
     async idle() {

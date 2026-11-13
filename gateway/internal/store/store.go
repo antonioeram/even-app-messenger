@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure Go driver: the image is built with CGO disabled
@@ -68,6 +69,12 @@ const (
 // Store is a handle on the message database.
 type Store struct {
 	db *sql.DB
+
+	// The change feed: seq numbers the latest change of what the lists and
+	// chats show, and changed is closed when the next one happens.
+	mu      sync.Mutex
+	seq     int64
+	changed chan struct{}
 }
 
 const schema = `
@@ -112,7 +119,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("upgrade message store: %w", err)
 	}
-	return &Store{db: db}, nil
+	// Starting from the clock makes the numbers of one run differ from those
+	// of the run before, so a client that waited across a restart reloads.
+	return &Store{db: db, seq: time.Now().UnixMilli(), changed: make(chan struct{})}, nil
 }
 
 // upgrade adds what databases created by earlier versions lack.
@@ -173,6 +182,35 @@ func repair(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
+// Changes returns the number of the latest change and a channel that is
+// closed at the next one. A change is a new message or a different unread
+// count; names are not counted.
+func (s *Store) Changes() (int64, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seq, s.changed
+}
+
+// touch records a change and wakes everyone waiting for one.
+func (s *Store) touch() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seq++
+	close(s.changed)
+	s.changed = make(chan struct{})
+}
+
+// touchIfChanged calls touch when a statement changed at least one row.
+func (s *Store) touchIfChanged(res sql.Result, err error) error {
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		s.touch()
+	}
+	return nil
+}
+
 // Close releases the database.
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -215,19 +253,25 @@ func (s *Store) SaveMessage(ctx context.Context, m Message) (bool, error) {
 	if _, err := tx.ExecContext(ctx, `UPDATE chats SET `+newestMessage+` WHERE id = ?`, m.ChatID); err != nil {
 		return false, err
 	}
-	return inserted > 0, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	if inserted > 0 {
+		s.touch()
+	}
+	return inserted > 0, nil
 }
 
 // SetUnread sets the unread counter of a chat.
 func (s *Store) SetUnread(ctx context.Context, chatID string, unread int) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE chats SET unread = ? WHERE id = ?`, unread, chatID)
-	return err
+	return s.touchIfChanged(s.db.ExecContext(ctx,
+		`UPDATE chats SET unread = ?1 WHERE id = ?2 AND unread != ?1`, unread, chatID))
 }
 
 // AddUnread adds delta to the unread counter of a chat.
 func (s *Store) AddUnread(ctx context.Context, chatID string, delta int) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE chats SET unread = MAX(0, unread + ?) WHERE id = ?`, delta, chatID)
-	return err
+	return s.touchIfChanged(s.db.ExecContext(ctx,
+		`UPDATE chats SET unread = MAX(0, unread + ?1) WHERE id = ?2 AND unread != MAX(0, unread + ?1)`, delta, chatID))
 }
 
 const chatColumns = `id, name, is_group, unread, last_ts, preview, last_from_me`
