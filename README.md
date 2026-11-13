@@ -27,9 +27,9 @@ Early, and built for one person's daily use.
 | Part | State |
 | --- | --- |
 | Gateway, WhatsApp link, history, live messages | Runs on a home server with a real account |
-| Lists, reading and ring input on real G2 glasses | Works |
+| Lists, reading, live updates and ring input on real G2 glasses | Works |
 | Transcription (Romanian and English) through the gateway | Tested with recorded speech |
-| Recording on the glasses and sending the reply | Covered by automated tests and the simulator; not yet confirmed on real glasses |
+| Recording on the glasses, quick replies and sending a reply | Covered by automated tests and the simulator; not yet confirmed on real glasses |
 
 ## How it works
 
@@ -46,7 +46,7 @@ G2 glasses  <-BLE->  Even app on the phone  <-HTTPS over your VPN->  gateway  <-
 | `glasses/` | The web app that the Even app runs for the glasses | TypeScript, Vite, Even Hub SDK |
 | `deploy/` | Docker Compose files and reverse proxy notes | Docker |
 | `contrib/stt-server/` | Example speech-to-text server (faster-whisper) | Python |
-| `docs/` | What we learned about the Even Hub platform | |
+| `docs/` | What we learned about the Even Hub platform, and the prompt the project was built from | |
 
 The gateway is the only component that talks to WhatsApp. It links to your account as a companion device, like WhatsApp Web.
 
@@ -224,6 +224,8 @@ npm run simulate
 ```
 
 Both parts are written test first. [docs/platform-notes.md](docs/platform-notes.md) lists what the Even Hub documentation says and what real glasses did differently.
+
+The project was built in conversation with an AI coding agent. [docs/build-prompt.md](docs/build-prompt.md) condenses all the requests into one prompt that you can give to an agent to rebuild it or to start a variant of your own.
 
 ## Known limits
 
