@@ -2,7 +2,7 @@
 // voice reply.
 //
 // A list is a title and up to four bordered boxes whose texts change in
-// place, with an arrowhead beside the selected one; a chat is a title and
+// place, with a chevron cell beside the selected one; a chat is a title and
 // message bubbles, theirs left and mine right.
 // Unread:     the home box, chats with unread messages. Scroll moves the
 //             selection, click opens, double click asks to exit. Its last

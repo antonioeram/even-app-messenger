@@ -39,9 +39,11 @@ const BORDER_WIDTH = 1
 const ROW_PADDING = 2
 const CENTERED_PADDING = Math.floor((ROW_HEIGHT - 2 * BORDER_WIDTH - LINE_HEIGHT) / 2)
 
-/** The selection marker: an image as tall as a row, in a column left of the boxes. */
+/**
+ * The selection marker: an image as tall as a row, left of each box. Lit, it
+ * is a framed cell with a chevron, joined to the box.
+ */
 export const MARKER = { width: 24, height: ROW_HEIGHT } as const
-const MARKER_GAP = 4
 const MARKER_FIRST_ID = HEAD.id + 1 + INBOX_ROWS
 
 export const BUBBLE_WIDTH = 440
@@ -52,7 +54,8 @@ const BUBBLE_GAP = 4
 const BRIGHT = 4
 const DIM = 2
 // Border grey level (0 to 15).
-const BORDER = 9
+export const BORDER = 9
+const BORDER_RADIUS = 6
 
 /** One inbox box. */
 export interface Row {
@@ -108,6 +111,7 @@ function box(
   text: string,
   bright: boolean,
   padding = 4,
+  radius = BORDER_RADIUS,
 ): TextContainerProperty {
   return new TextContainerProperty({
     xPosition: frame.x,
@@ -116,7 +120,7 @@ function box(
     height: frame.height,
     borderWidth: BORDER_WIDTH,
     borderColor: BORDER,
-    borderRadius: 6,
+    borderRadius: radius,
     paddingLength: padding,
     containerID: HEAD.id + 1 + index,
     containerName: name,
@@ -159,14 +163,17 @@ export function rowLayout(rows: readonly Row[]): string {
 
 function inboxLayout(title: string, rows: readonly Row[], markers: boolean) {
   const shown = rows.slice(0, INBOX_ROWS)
-  const left = markers ? MARKER.width + MARKER_GAP : 0
+  // With markers the box shares its left border with the marker cell and has
+  // square corners, so the two join into one frame.
+  const left = markers ? MARKER.width - BORDER_WIDTH : 0
+  const radius = markers ? 0 : BORDER_RADIUS
   // One box per row: a list shorter than the screen leaves the rest empty.
   const textObject = [
     head(title),
     ...shown.map((row, index) => {
       const frame = { x: left, y: rowTop(index), width: SCREEN.width - left, height: ROW_HEIGHT }
       const padding = row.centered ? CENTERED_PADDING : ROW_PADDING
-      return box(index, rowName(index), frame, rowText(row, markers), rowBright(row), padding)
+      return box(index, rowName(index), frame, rowText(row, markers), rowBright(row), padding, radius)
     }),
   ]
   // Image containers start empty; their pixels are sent once the page exists.

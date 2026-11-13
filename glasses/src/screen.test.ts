@@ -22,6 +22,7 @@ type Box = {
   width?: number
   height?: number
   borderWidth?: number
+  borderRadius?: number
   paddingLength?: number
   containerID?: number
   containerName?: string
@@ -131,7 +132,10 @@ describe('selection marker', () => {
       // Centred on its row.
       const row = boxes[index]
       expect((image.yPosition ?? 0) + MARKER.height / 2).toBe((row?.yPosition ?? 0) + (row?.height ?? 0) / 2)
-      expect(row?.xPosition ?? 0).toBeGreaterThanOrEqual(MARKER.width)
+      // The box starts on the last column of the image, so its left border closes the marker cell.
+      expect(row?.xPosition).toBe(MARKER.width - 1)
+      // Square corners, so the cell and the box read as one frame.
+      expect(row?.borderRadius ?? 0).toBe(0)
       expect((row?.xPosition ?? 0) + (row?.width ?? 0)).toBe(SCREEN.width)
       expect({ containerID: image.containerID, containerName: image.containerName }).toEqual(markerSlot(index))
     })
@@ -139,6 +143,7 @@ describe('selection marker', () => {
 
   it('has no image slots and marks the selected row in its text when images are off', () => {
     const page = inboxPage('Unread (3)', rows(3))
+    expect(page.textObject?.[1]?.borderRadius ?? 0).toBeGreaterThan(0)
     expect(page.imageObject ?? []).toHaveLength(0)
     expect(expectValidPage(page).slice(1).map((box) => box.content)).toEqual(['  row 0', '> row 1', '  row 2'])
     expect(rowUpdate(1, { text: 'row 1', selected: false }, false).content).toBe('  row 1')

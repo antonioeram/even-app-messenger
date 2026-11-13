@@ -10,7 +10,7 @@ Screenshots are from the Even Hub simulator, with made-up data.
 
 ## What it does
 
-- **Unread box.** The home screen lists the chats with unread messages, four boxes per page: name, time and the newest message, marked `Me:` when you wrote it. An arrowhead points at the selected box.
+- **Unread box.** The home screen lists the chats with unread messages, four boxes per page: name, time and the newest message, marked `Me:` when you wrote it. A small cell with a chevron marks the selected box.
 - **Unanswered and All chats.** Two more lists, opened from the last two rows of the home screen: read chats that still wait for your reply, and every chat. The title shows how many chats a list holds, and a long list loads as you scroll.
 - **Reading.** A chat opens as message bubbles, theirs on the left and yours on the right, each with the sender's name and the time. It opens on the newest page; scroll up for older messages. A `+` after the page count means the server holds more, and scrolling up past the first page loads them.
 - **Voice reply.** Hold the touchpad and speak. The recording is transcribed on your server and the text appears on the glasses. A click sends it; a double click cancels. Nothing is sent without that click.
@@ -131,11 +131,11 @@ npx evenhub login
 ```
 
 ```bash
-npx evenhub create messenger-0.8.0.ehpk --name "Messenger" --tagline "Messages from your own server"
+npx evenhub create messenger-0.8.1.ehpk --name "Messenger" --tagline "Messages from your own server"
 ```
 
 ```bash
-npx evenhub promote 0.8.0 --to beta
+npx evenhub promote 0.8.1 --to beta
 ```
 
 ```bash
